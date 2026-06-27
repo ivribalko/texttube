@@ -1,0 +1,241 @@
+#!/bin/bash
+
+# Launch TextTube from a repository checkout by reusing the repo-local .venv,
+# installing the local Homebrew service wrapper, and routing runs into
+# texttube_app.py.
+
+# Fail on unset variables, nonzero commands, and broken pipelines.
+set -euo pipefail
+
+# Resolve the checkout root and the local virtualenv locations.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${TEXTTUBE_REPO_ROOT:-${SCRIPT_DIR}}"
+PYTHON_BIN="${TEXTTUBE_PYTHON_BIN:-python3}"
+VENV_DIR="${REPO_ROOT}/.venv"
+REQUIREMENTS_FILE="${REPO_ROOT}/requirements.txt"
+FORMULA_SOURCE_FILE="${REPO_ROOT}/Formula/texttube.rb"
+OLLAMA_PORT=11434
+USER_LAUNCHD_DOMAIN="gui/$(id -u)"
+TEXTTUBE_LAUNCH_AGENT_PLIST="${HOME}/Library/LaunchAgents/homebrew.mxcl.texttube.plist"
+
+show_help() {
+  cat <<'EOF'
+Usage:
+  ./texttube [run] [--limit N | --video URL_OR_ID] [--cache] [--verbose] [--reset-cutoff]
+  ./texttube auth
+  ./texttube install --daily-time HH:MM
+  ./texttube --help
+
+Commands:
+  run      Run once. This is the default command.
+  auth     Renew the YouTube OAuth refresh token in .secrets.
+  install  Install Homebrew service wrapper for scheduled runs.
+
+Options:
+  --limit N          Maximum videos to process. Default is 100; use 0 for unlimited.
+  --video URL_OR_ID  Summarize one video instead of subscription uploads.
+  --cache            Reuse and update per-video transcript and audio caches.
+  --verbose          Print detailed progress logs instead of stage-start logs only.
+  --reset-cutoff     Manual runs only. Ignore the saved subscription cutoff for this run.
+  --daily-time HH:MM Required with install. Schedule the Homebrew service at local wall-clock time.
+  -h, --help         Show this help.
+EOF
+}
+
+authenticate_youtube() {
+  local repo
+  repo="${REPO_ROOT}"
+  if [[ ! -f "${repo}/.secrets" ]]; then
+    echo "Missing ${repo}/.secrets; create it before running auth." >&2
+    exit 1
+  fi
+
+  TEXTTUBE_REPO_ROOT="${repo}" "${PYTHON_BIN}" "${repo}/texttube_auth.py"
+}
+
+validate_daily_time() {
+  local value
+  value="${1}"
+  if [[ ! "${value}" =~ ^([0-9]{2}):([0-9]{2})$ ]]; then
+    echo "Invalid --daily-time value '${value}'. Use HH:MM in local time." >&2
+    exit 2
+  fi
+  if (( 10#${BASH_REMATCH[1]} > 23 )); then
+    echo "Invalid --daily-time hour '${BASH_REMATCH[1]}'. Use 00-23." >&2
+    exit 2
+  fi
+  if (( 10#${BASH_REMATCH[2]} > 59 )); then
+    echo "Invalid --daily-time minute '${BASH_REMATCH[2]}'. Use 00-59." >&2
+    exit 2
+  fi
+}
+
+install_service() {
+  local repo tap_root package_dir package_archive package_sha tap_formula package_file schedule_value schedule_hour schedule_minute
+  repo="${REPO_ROOT}"
+  if [[ ! -f "${repo}/.secrets" ]]; then
+    echo "Missing ${repo}/.secrets; create it before installing the service." >&2
+    exit 1
+  fi
+  schedule_value="${1:-}"
+  if [[ -z "${schedule_value}" ]]; then
+    echo "install requires --daily-time HH:MM." >&2
+    exit 2
+  fi
+  validate_daily_time "${schedule_value}"
+  schedule_hour="${schedule_value%%:*}"
+  schedule_minute="${schedule_value##*:}"
+
+  if ! brew tap | grep -qx "local/texttube"; then
+    brew tap-new local/texttube
+  fi
+  tap_root="$(brew --repository local/texttube)"
+  package_dir="${tap_root}/texttube-source"
+  package_archive="${tap_root}/texttube-source.tar.gz"
+  tap_formula="${tap_root}/Formula/texttube.rb"
+
+  rm -rf "${package_dir}"
+  rm -f "${package_archive}"
+  mkdir -p "${package_dir}"
+  for package_file in \
+    ".secrets" \
+    "SUMMARIZER.md" \
+    "requirements.txt" \
+    "texttube_app.py"
+  do
+    cp "${repo}/${package_file}" "${package_dir}/${package_file}"
+  done
+  tar -czf "${package_archive}" -C "${package_dir}" .
+  package_sha="$(shasum -a 256 "${package_archive}" | awk '{print $1}')"
+
+  cp "${FORMULA_SOURCE_FILE}" "${tap_formula}"
+  TEXTTUBE_SOURCE_ARCHIVE="${package_archive}" TEXTTUBE_SOURCE_SHA="${package_sha}" \
+  TEXTTUBE_SERVICE_HOUR="${schedule_hour}" TEXTTUBE_SERVICE_MINUTE="${schedule_minute}" perl -0pi \
+    -e 's|__TEXTTUBE_SOURCE_ARCHIVE__|$ENV{TEXTTUBE_SOURCE_ARCHIVE}|g; s|__TEXTTUBE_SOURCE_SHA256__|$ENV{TEXTTUBE_SOURCE_SHA}|g; s|__TEXTTUBE_SERVICE_HOUR__|$ENV{TEXTTUBE_SERVICE_HOUR}|g; s|__TEXTTUBE_SERVICE_MINUTE__|$ENV{TEXTTUBE_SERVICE_MINUTE}|g' \
+    "${tap_formula}"
+  brew services stop texttube >/dev/null 2>&1 || true
+  launchctl bootout "${USER_LAUNCHD_DOMAIN}" "${TEXTTUBE_LAUNCH_AGENT_PLIST}" >/dev/null 2>&1 || true
+  brew uninstall --force texttube || true
+  brew install --build-from-source local/texttube/texttube
+  ensure_ollama_service
+  brew services start texttube
+}
+
+ollama_is_ready() {
+  "${PYTHON_BIN}" - <<'PY' >/dev/null 2>&1
+import sys
+from urllib import error, request
+
+try:
+    with request.urlopen("http://127.0.0.1:11434/api/version", timeout=1) as response:
+        sys.exit(0 if response.status == 200 else 1)
+except (OSError, error.URLError):
+    sys.exit(1)
+PY
+}
+
+wait_for_ollama() {
+  local attempts
+
+  for attempts in {1..60}; do
+    if ollama_is_ready; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Ollama did not become ready on port ${OLLAMA_PORT} after starting the Homebrew service." >&2
+  return 1
+}
+
+ensure_ollama_service() {
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "Homebrew is required to install and start Ollama automatically." >&2
+    exit 1
+  fi
+
+  if ! brew list --formula ollama >/dev/null 2>&1; then
+    echo "Installing Ollama with Homebrew..." >&2
+    brew install ollama
+  fi
+
+  if ! ollama_is_ready; then
+    echo "Starting Ollama Homebrew service..." >&2
+    brew services start ollama
+    wait_for_ollama
+  fi
+}
+
+setup_venv() {
+  if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
+    # Create the repo-local venv the first time the checkout is used.
+    "${PYTHON_BIN}" -m venv "${VENV_DIR}"
+    # Keep routine pip stdout quiet while leaving errors visible on stderr.
+    "${VENV_DIR}/bin/python" -m pip install --upgrade pip >/dev/null
+  fi
+
+  # Keep routine pip stdout quiet while leaving errors visible on stderr.
+  "${VENV_DIR}/bin/pip" install --requirement "${REQUIREMENTS_FILE}" >/dev/null
+}
+
+# Ensure the local runtime directories exist before launching the service.
+mkdir -p "${REPO_ROOT}/var/logs" "${REPO_ROOT}/var"
+
+if [[ $# -eq 0 ]]; then
+  set -- run
+else
+  case "${1}" in
+    -h|--help)
+      show_help
+      exit 0
+      ;;
+    run|auth|install)
+      ;;
+    *)
+      set -- run "$@"
+      ;;
+  esac
+fi
+
+case "${1}" in
+  run)
+    shift
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+      show_help
+      exit 0
+    fi
+    set -- run "$@"
+    ;;
+  install)
+    shift
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+      show_help
+      exit 0
+    fi
+    if [[ $# -ne 2 || "${1}" != "--daily-time" ]]; then
+      echo "Usage: ./texttube install --daily-time HH:MM" >&2
+      exit 2
+    fi
+    install_service "${2}"
+    exit 0
+    ;;
+  auth)
+    shift
+    if [[ $# -ne 0 ]]; then
+      echo "Usage: ./texttube auth" >&2
+      exit 2
+    fi
+    authenticate_youtube
+    exit 0
+    ;;
+esac
+
+# Set up the local virtualenv before launching the service.
+setup_venv
+ensure_ollama_service
+
+if [[ "${1}" == "run" ]]; then
+  shift
+  cd "${REPO_ROOT}"
+  exec env TEXTTUBE_MANUAL_RUN=1 "${VENV_DIR}/bin/python" "${REPO_ROOT}/texttube_app.py" "$@"
+fi
