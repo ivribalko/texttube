@@ -13,5 +13,6 @@
 - Do not use the official YouTube captions API for caption downloads because it does not reliably work for non-owned videos; prefer non-official caption retrieval or local audio transcription instead.
 - Do not add automated tests unless project requirements change.
 - Use manual verification with `python3 -m py_compile texttube_app.py` and `bash -n texttube`.
+- Before pushing anything to a remote, test everything locally, including the relevant checks in the separate `../homebrew-texttube` formula repository.
 - For end-to-end subscription checks, an hourly automation run with verbose output redirected to a timestamped `var/logs/automation-runs/` file is an easy low-context test path.
 - Do not use numbered lists in Markdown files.
