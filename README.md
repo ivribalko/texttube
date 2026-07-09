@@ -10,8 +10,8 @@ Design and runtime layout live in [ARCHITECTURE.md](ARCHITECTURE.md). Summarizat
 ## Requirements
 
 - Python 3.10+ available as `python3` for checkout runs. The Homebrew package uses `python@3.14`.
-- Homebrew.
-- Ollama available as a host system service. The checkout launcher and service installer install the Homebrew `ollama` formula when missing, start `brew services start ollama`, and wait for it before starting TextTube.
+- Homebrew for installed scheduled runs.
+- Ollama available on `127.0.0.1:11434`. Checkout runs only check readiness; installed init starts the Homebrew-managed `ollama` service when available.
 - `ffmpeg` installed on the Mac host.
 - Telegram bot token and chat ID.
 - Google OAuth client credentials and refresh token for scheduled subscription runs, or a short-lived `YOUTUBE_ACCESS_TOKEN` environment variable for manual checkout runs.
@@ -20,16 +20,21 @@ Python dependency versions are pinned in [requirements.txt](requirements.txt) fo
 
 ## Secrets
 
-Create `.secrets` in the repository root for checkout runs.
+Run interactive init to create `.secrets` for the active runtime.
 
-```env
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
-GOOGLE_OAUTH_CLIENT_ID=your_google_client_id
-GOOGLE_OAUTH_CLIENT_SECRET=your_google_client_secret
-GOOGLE_OAUTH_REFRESH_TOKEN=your_google_refresh_token
-TRANSCRIPT_LANGUAGES=en
+For Homebrew installs:
+
+```sh
+texttube init
 ```
+
+For checkout runs:
+
+```sh
+./texttube init
+```
+
+Init asks for Telegram and Google OAuth values, opens Google OAuth in a browser, and writes `GOOGLE_OAUTH_REFRESH_TOKEN` automatically. It never asks you to paste the refresh token.
 
 `YOUTUBE_ACCESS_TOKEN` is optional only as a shell environment variable for repo checkout manual runs through `./texttube` or `./texttube run`. `.secrets` and scheduled service runs ignore it and continue to use the refresh-token flow.
 
@@ -41,7 +46,78 @@ Optional one-off or service-level model overrides:
 - `TEXTTUBE_LIMIT` sets the default per-run video limit when `--limit` is not passed.
 - `TEXTTUBE_VERBOSE` sets the default log verbosity when `--verbose` is not passed. Only the exact value `true` enables it; every other value disables it.
 
-## Setup
+## Homebrew Install
+
+Install the scheduled TextTube service from the public Homebrew tap:
+
+```sh
+brew install ivribalko/texttube/texttube
+```
+
+Initialize Homebrew runtime secrets and schedule:
+
+```sh
+texttube init
+```
+
+Installed init writes only under `$(brew --prefix)/var/texttube`, including `.secrets` and `service.cron`, then restarts the Homebrew-managed TextTube service. The service schedule uses a standard five-field cron expression such as `0 18 * * *`.
+
+The packaged service uses:
+
+- a private Homebrew-managed virtualenv under `$(brew --prefix)/var/texttube/venv`
+- `$(brew --prefix)/var/texttube/.secrets` for runtime secrets
+- `$(brew --prefix)/var/texttube/service.cron` for the Homebrew service schedule
+- `$(brew --prefix)/var/texttube/var/logs/texttube.log` for scheduled-run and per-run helper logs
+- `$(brew --prefix)/var/texttube/var/state/last_subscription_window_end_utc.txt` for the last successful subscription-run cutoff
+- `$(brew --prefix)/var/texttube/var` for runtime artifacts, including single-video transcript and audio cache reuse under `var/cache/`
+
+Manual service control:
+
+```sh
+brew services info ollama
+```
+
+```sh
+brew services info texttube
+```
+
+```sh
+brew services restart texttube
+```
+
+```sh
+brew services stop texttube
+```
+
+## Checkout Setup
+
+Checkout commands are local-only. `./texttube` never installs, configures, starts, stops, taps, untaps, or trusts Homebrew packages or services, and it only changes files inside the repository checkout.
+
+Create or update checkout `.secrets`:
+
+```sh
+./texttube init
+```
+
+Run one checkout pass:
+
+```sh
+./texttube run
+```
+
+Checkout runs are not schedulable through `./texttube`; scheduling belongs to the Homebrew-installed service.
+
+Developers who need both repositories can clone them independently as siblings:
+
+```sh
+git clone https://github.com/ivribalko/texttube.git
+```
+
+```sh
+git clone https://github.com/ivribalko/homebrew-texttube.git
+```
+
+## OAuth Setup Notes
 
 Optional one-off access token flow:
 
@@ -55,62 +131,31 @@ Durable refresh-token flow:
 
 - Enable YouTube Data API v3 and create OAuth client credentials for a desktop app in Google Cloud `https://console.cloud.google.com/apis/library`
 - In Google Cloud, add your Google account as a test user if the OAuth app is still in `Testing`: `https://console.cloud.google.com/auth/audience`
-- Use the checkout auth helper to create or renew the stored Google refresh token:
+- Use init or auth to create or renew the stored Google refresh token:
+
+```sh
+texttube auth
+```
 
 ```sh
 ./texttube auth
 ```
 
-- The launcher calls `texttube_auth.py`, which opens Google OAuth consent in a browser, listens only on `http://127.0.0.1:8080`, exchanges the callback code, and updates only `GOOGLE_OAUTH_REFRESH_TOKEN` in `.secrets` without printing tokens.
-- Reinstall the Homebrew service after checkout auth if the packaged service also needs the renewed token:
-
-```sh
-./texttube install --daily-time HH:MM
-```
+- The auth helper opens Google OAuth consent in a browser, listens only on `http://127.0.0.1:8080`, exchanges the callback code, and updates only `GOOGLE_OAUTH_REFRESH_TOKEN` in the active `.secrets` without printing tokens.
 
 Official docs:
 
 - [YouTube Data API Python quickstart](https://developers.google.com/youtube/v3/quickstart/python)
 - [Google OAuth 2.0 for iOS & Desktop Apps](https://developers.google.com/identity/protocols/oauth2/native-app)
 
-## Install Service
-
-Install or reinstall the local TextTube service:
-
-```sh
-./texttube install --daily-time HH:MM
-```
-
-The command requires `.secrets` in the repository root and a mandatory local wall-clock `--daily-time HH:MM` argument, stages only the files needed by the packaged app through the generated `local/texttube` Homebrew tap, keeps a checkout-local bare `origin` for that tap under `var/homebrew/` so Homebrew can update it cleanly, stops the old Homebrew service when it is running, reinstalls the existing Homebrew service package or installs it when missing, copies `.secrets` into `$(brew --prefix)/var/texttube/.secrets`, installs Ollama through Homebrew when missing, starts the Homebrew-managed Ollama service, and starts the requested daily TextTube schedule.
-
-The packaged service uses:
-
-- a private Homebrew-managed virtualenv under `$(brew --prefix)/var/texttube/venv`
-- `$(brew --prefix)/var/texttube/.secrets` for runtime secrets
-- `$(brew --prefix)/var/texttube/var/logs/texttube.log` for scheduled-run and per-run helper logs
-- `$(brew --prefix)/var/texttube/var/state/last_subscription_window_end_utc.txt` for the last successful subscription-run cutoff
-- `$(brew --prefix)/var/texttube/var` for runtime artifacts, including single-video transcript and audio cache reuse under `var/cache/`
-
-Scheduled Homebrew service runs use the packaged Homebrew `texttube` command, use `$(brew --prefix)/var/texttube` for secrets and state, and do not read a one-off `YOUTUBE_ACCESS_TOKEN` from the shell.
-
 ## Scheduled Run
 
-The single `texttube` Homebrew service uses a Homebrew-native schedule generated from the install command and lets Homebrew trigger the run directly.
+The single `texttube` Homebrew service uses the cron expression written by installed `texttube init` and lets Homebrew trigger the run directly.
 
-- `./texttube install --daily-time HH:MM` sets the service to run once per day at that local macOS wall-clock time.
+- `texttube init` asks for a standard five-field cron expression, for example `0 18 * * *`.
 - Each subscription run processes videos published between the previous successful subscription-run cutoff and the current run start, then records the new cutoff in `$(brew --prefix)/var/texttube/var/state/last_subscription_window_end_utc.txt`.
 - Duplicate Telegram messages are possible when a creator removes and reuploads the same content because YouTube gives the reupload a new video ID and publish timestamp.
 - Checkout manual subscription runs can bypass the saved cutoff once with `./texttube --reset-cutoff`; the scheduled Homebrew service does not use that override.
-
-Manual service control:
-
-```sh
-brew services info ollama
-brew services info texttube
-brew services restart ollama
-brew services restart texttube
-brew services stop texttube
-```
 
 ## Manual Run
 
@@ -130,7 +175,7 @@ Run one subscription pass from the repository checkout with no limit and a reset
 ```
 
 The checkout launcher runs one TextTube pass when no subcommand is provided.
-For manual checkout runs, the launcher installs Ollama through Homebrew when missing, starts the Homebrew-managed Ollama service when needed, and waits for it before app startup.
+For manual checkout runs, the launcher verifies Ollama is reachable on `127.0.0.1:11434` and exits with instructions when it is not.
 If `YOUTUBE_ACCESS_TOKEN` is set in the shell environment that launches `./texttube` or `./texttube run`, the checkout launcher uses it directly for YouTube API calls instead of refreshing `GOOGLE_OAUTH_REFRESH_TOKEN`. The token is not read from `.secrets`.
 
 Manual one-video run with cache reuse and verbose logging:

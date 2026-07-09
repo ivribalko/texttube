@@ -1,8 +1,8 @@
 """Checkout OAuth helper for renewing TextTube's YouTube refresh token.
 
-This file owns the interactive Google OAuth consent flow used by `./texttube
-auth`. It updates only `GOOGLE_OAUTH_REFRESH_TOKEN` in checkout `.secrets` and
-does not print token values.
+This file owns the interactive Google OAuth consent flow used by TextTube auth
+commands. It updates only `GOOGLE_OAUTH_REFRESH_TOKEN` in the selected
+`.secrets` file and does not print token values.
 """
 
 from __future__ import annotations
@@ -194,10 +194,14 @@ def exchange_auth_code(
 
 
 def main() -> int:
-    repo_root = Path(os.environ.get("TEXTTUBE_REPO_ROOT", Path.cwd()))
-    secrets_path = repo_root / ".secrets"
+    configured_secrets_path = os.environ.get("TEXTTUBE_SECRETS_PATH", "").strip()
+    if configured_secrets_path:
+        secrets_path = Path(configured_secrets_path).expanduser()
+    else:
+        repo_root = Path(os.environ.get("TEXTTUBE_REPO_ROOT", Path.cwd()))
+        secrets_path = repo_root / ".secrets"
     if not secrets_path.exists():
-        print("Missing .secrets; create it before running auth.", file=sys.stderr)
+        print(f"Missing {secrets_path}; create it before running auth.", file=sys.stderr)
         return 1
 
     values = read_dotenv(secrets_path)

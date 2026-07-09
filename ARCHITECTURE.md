@@ -7,9 +7,10 @@ This file is the canonical design reference for repository layout, component res
 ## Repository Layout
 
 - `texttube_app.py` is the single Python entrypoint. It owns configuration loading, YouTube API access, transcript fetching, audio-transcription fallback, Ollama calls, Telegram delivery, application command-line behavior, process signal handling, and subscription run state.
-- `texttube` is the checkout launcher. It owns the user-facing CLI, local `.venv` setup, Ollama readiness checks, checkout OAuth refresh-token renewal, and Homebrew service installation from the repository checkout.
-- `texttube_auth.py` is the checkout OAuth helper. It owns Google consent URL generation, the local OAuth callback listener, token exchange, and refresh-token replacement in `.secrets`.
-- `Formula/texttube.rb` packages the scheduled Homebrew install. It stages the runtime files into `libexec`, installs a private virtualenv under Homebrew state, copies packaged `.secrets`, and defines the cron-style Homebrew service.
+- `texttube` is the checkout launcher. It owns the checkout user-facing CLI, local `.venv` setup, Ollama readiness checks, checkout initialization, checkout OAuth refresh-token renewal, and local app runs. It never installs, configures, starts, or stops Homebrew packages or services.
+- `texttube_init.py` is the interactive setup helper. It owns local secret collection, optional Homebrew service cron collection for installed runs, dotenv writing, and orchestration of the OAuth helper.
+- `texttube_auth.py` is the OAuth helper. It owns Google consent URL generation, the local OAuth callback listener, token exchange, and refresh-token replacement in the selected `.secrets` file.
+- `ivribalko/homebrew-texttube` is the separate public Homebrew tap repository. Its formula packages scheduled Homebrew installs, stages runtime files into `libexec`, installs a private virtualenv under Homebrew state, and defines the cron-style Homebrew service.
 - `SUMMARIZER.md` is the single source of truth for summarization instructions and summary output rules.
 - `README.md` is the operator guide for setup, secrets, manual runs, and service installation.
 - `AGENTS.md` captures repository-specific working rules for Codex contributors.
@@ -23,8 +24,9 @@ This file is the canonical design reference for repository layout, component res
 
 - Checkout runs use the repository root as `TEXTTUBE_HOME` when that variable is unset.
 - Checkout runs keep mutable runtime data under `var/` in the repository checkout.
-- Packaged Homebrew runs set `TEXTTUBE_HOME` to `$(brew --prefix)/var/texttube`.
-- Packaged Homebrew runs keep their mutable runtime data under `$(brew --prefix)/var/texttube/var`.
+- Installed Homebrew runs set `TEXTTUBE_HOME` to `$(brew --prefix)/var/texttube`.
+- Installed Homebrew runs keep their mutable runtime data under `$(brew --prefix)/var/texttube/var`.
+- Installed Homebrew runs store service schedule configuration in `$(brew --prefix)/var/texttube/service.cron`.
 - The persisted subscription window cutoff lives at `var/state/last_subscription_window_end_utc.txt` under the active runtime home.
 - Optional single-video transcript reuse lives at `var/cache/<video_id>.txt` under the active runtime home.
 - Optional single-video audio reuse lives at `var/cache/<video_id>.m4a` under the active runtime home.
@@ -44,9 +46,10 @@ This file is the canonical design reference for repository layout, component res
 
 ## Component Interactions
 
-- `./texttube` sets up the repository-local `.venv`, ensures the Homebrew-managed Ollama service is available, and launches `texttube_app.py` with `TEXTTUBE_MANUAL_RUN=1` for checkout runs.
+- `./texttube` sets up the repository-local `.venv`, verifies Ollama is already reachable, and launches `texttube_app.py` with `TEXTTUBE_MANUAL_RUN=1` for checkout runs.
+- `./texttube init` calls `texttube_init.py` to create or update checkout `.secrets` interactively, including browser OAuth, without touching Homebrew state.
 - `./texttube auth` calls `texttube_auth.py` to renew `GOOGLE_OAUTH_REFRESH_TOKEN` in checkout `.secrets` by opening Google OAuth consent, listening for the local `127.0.0.1:8080` callback, and exchanging the callback code without printing tokens.
-- `./texttube install --daily-time HH:MM` stages the packaged app files under checkout-local `var/homebrew/`, templates the schedule into the generated `local/texttube` Homebrew tap, maintains a local bare `origin` for that tap so Homebrew can update it cleanly, ensures Ollama is installed and started through Homebrew, and starts the scheduled TextTube service.
+- `texttube init` from the Homebrew install calls `texttube_init.py` to create or update `$(brew --prefix)/var/texttube/.secrets`, write the cron schedule to `$(brew --prefix)/var/texttube/service.cron`, run browser OAuth, and restart the Homebrew-managed TextTube service.
 - `TextTubeApp` loads `.secrets` from the active runtime home, overlays environment variables, lets command-line flags override overlapping runtime defaults, resolves the prompt file, and creates one shared `requests.Session`.
 - Checkout manual runs allow `YOUTUBE_ACCESS_TOKEN` only from the launching shell environment as a direct YouTube bearer token override. `.secrets` and scheduled service runs ignore that override and continue using the stored Google OAuth refresh token flow.
 - A single-video run fetches one video’s metadata and skips the subscription traversal path.
@@ -78,6 +81,6 @@ This file is the canonical design reference for repository layout, component res
 - `yt-dlp` handles local audio download for fallback transcription.
 - `mlx-whisper` handles Apple Silicon audio transcription through the local helper server.
 - `ffmpeg` is required on the host Mac for audio decoding and chunking.
-- Homebrew services manage the daily TextTube schedule and the local Ollama service used for summarization.
+- Homebrew services manage the installed TextTube cron schedule and the local Ollama service used for summarization.
 
 Keep the architecture simple. Add files only when `texttube_app.py` becomes genuinely hard to reason about, and keep external service behavior explicit at the call sites.
