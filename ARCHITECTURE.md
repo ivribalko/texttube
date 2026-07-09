@@ -46,7 +46,7 @@ This file is the canonical design reference for repository layout, component res
 
 - `./texttube` sets up the repository-local `.venv`, ensures the Homebrew-managed Ollama service is available, and launches `texttube_app.py` with `TEXTTUBE_MANUAL_RUN=1` for checkout runs.
 - `./texttube auth` calls `texttube_auth.py` to renew `GOOGLE_OAUTH_REFRESH_TOKEN` in checkout `.secrets` by opening Google OAuth consent, listening for the local `127.0.0.1:8080` callback, and exchanging the callback code without printing tokens.
-- `./texttube install --daily-time HH:MM` stages the packaged app files, templates the schedule into `Formula/texttube.rb`, installs the local Homebrew formula, ensures Ollama is installed and started through Homebrew, and starts the scheduled TextTube service.
+- `./texttube install --daily-time HH:MM` stages the packaged app files under checkout-local `var/homebrew/`, templates the schedule into the generated `local/texttube` Homebrew tap, maintains a local bare `origin` for that tap so Homebrew can update it cleanly, ensures Ollama is installed and started through Homebrew, and starts the scheduled TextTube service.
 - `TextTubeApp` loads `.secrets` from the active runtime home, overlays environment variables, lets command-line flags override overlapping runtime defaults, resolves the prompt file, and creates one shared `requests.Session`.
 - Checkout manual runs allow `YOUTUBE_ACCESS_TOKEN` only from the launching shell environment as a direct YouTube bearer token override. `.secrets` and scheduled service runs ignore that override and continue using the stored Google OAuth refresh token flow.
 - A single-video run fetches one video’s metadata and skips the subscription traversal path.

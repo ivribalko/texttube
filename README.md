@@ -81,7 +81,7 @@ Install or reinstall the local TextTube service:
 ./texttube install --daily-time HH:MM
 ```
 
-The command requires `.secrets` in the repository root and a mandatory local wall-clock `--daily-time HH:MM` argument, stages only the files needed by the packaged app into the local Homebrew tap, stops the old Homebrew service when it is running, uninstalls the old Homebrew service package when it exists, copies `.secrets` into `$(brew --prefix)/var/texttube/.secrets`, installs a fresh Homebrew service package, installs Ollama through Homebrew when missing, starts the Homebrew-managed Ollama service, and starts the requested daily TextTube schedule.
+The command requires `.secrets` in the repository root and a mandatory local wall-clock `--daily-time HH:MM` argument, stages only the files needed by the packaged app through the generated `local/texttube` Homebrew tap, keeps a checkout-local bare `origin` for that tap under `var/homebrew/` so Homebrew can update it cleanly, stops the old Homebrew service when it is running, reinstalls the existing Homebrew service package or installs it when missing, copies `.secrets` into `$(brew --prefix)/var/texttube/.secrets`, installs Ollama through Homebrew when missing, starts the Homebrew-managed Ollama service, and starts the requested daily TextTube schedule.
 
 The packaged service uses:
 

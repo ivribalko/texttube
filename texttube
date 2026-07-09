@@ -71,7 +71,7 @@ validate_daily_time() {
 }
 
 install_service() {
-  local repo tap_root package_dir package_archive package_sha tap_formula package_file schedule_value schedule_hour schedule_minute
+  local repo tap_root tap_origin tap_branch package_root package_dir package_archive package_sha tap_formula package_file schedule_value schedule_hour schedule_minute
   repo="${REPO_ROOT}"
   if [[ ! -f "${repo}/.secrets" ]]; then
     echo "Missing ${repo}/.secrets; create it before installing the service." >&2
@@ -86,13 +86,28 @@ install_service() {
   schedule_hour="${schedule_value%%:*}"
   schedule_minute="${schedule_value##*:}"
 
+  package_root="${repo}/var/homebrew"
+  tap_origin="${package_root}/homebrew-texttube.git"
+
+  mkdir -p "${package_root}"
   if ! brew tap | grep -qx "local/texttube"; then
     brew tap-new local/texttube
   fi
   tap_root="$(brew --repository local/texttube)"
-  package_dir="${tap_root}/texttube-source"
+  package_dir="${package_root}/texttube-source"
   package_archive="${tap_root}/texttube-source.tar.gz"
   tap_formula="${tap_root}/Formula/texttube.rb"
+
+  if [[ ! -d "${tap_origin}" ]]; then
+    git init --bare "${tap_origin}" >/dev/null
+  fi
+  if git -C "${tap_root}" remote get-url origin >/dev/null 2>&1; then
+    git -C "${tap_root}" remote set-url origin "${tap_origin}"
+  else
+    git -C "${tap_root}" remote add origin "${tap_origin}"
+  fi
+  git -C "${tap_root}" config user.name "TextTube Installer"
+  git -C "${tap_root}" config user.email "texttube@localhost.invalid"
 
   rm -rf "${package_dir}"
   rm -f "${package_archive}"
@@ -106,6 +121,7 @@ install_service() {
     cp "${repo}/${package_file}" "${package_dir}/${package_file}"
   done
   tar -czf "${package_archive}" -C "${package_dir}" .
+  rm -rf "${package_dir}"
   package_sha="$(shasum -a 256 "${package_archive}" | awk '{print $1}')"
 
   cp "${FORMULA_SOURCE_FILE}" "${tap_formula}"
@@ -113,10 +129,20 @@ install_service() {
   TEXTTUBE_SERVICE_HOUR="${schedule_hour}" TEXTTUBE_SERVICE_MINUTE="${schedule_minute}" perl -0pi \
     -e 's|__TEXTTUBE_SOURCE_ARCHIVE__|$ENV{TEXTTUBE_SOURCE_ARCHIVE}|g; s|__TEXTTUBE_SOURCE_SHA256__|$ENV{TEXTTUBE_SOURCE_SHA}|g; s|__TEXTTUBE_SERVICE_HOUR__|$ENV{TEXTTUBE_SERVICE_HOUR}|g; s|__TEXTTUBE_SERVICE_MINUTE__|$ENV{TEXTTUBE_SERVICE_MINUTE}|g' \
     "${tap_formula}"
+  git -C "${tap_root}" add "${tap_formula}" "${package_archive}"
+  if ! git -C "${tap_root}" diff --cached --quiet; then
+    git -C "${tap_root}" commit -m "Update TextTube package" >/dev/null
+  fi
+  tap_branch="$(git -C "${tap_root}" rev-parse --abbrev-ref HEAD)"
+  git -C "${tap_root}" push -u origin "${tap_branch}" >/dev/null
+  brew trust --formula local/texttube/texttube >/dev/null
   brew services stop texttube >/dev/null 2>&1 || true
   launchctl bootout "${USER_LAUNCHD_DOMAIN}" "${TEXTTUBE_LAUNCH_AGENT_PLIST}" >/dev/null 2>&1 || true
-  brew uninstall --force texttube || true
-  brew install --build-from-source local/texttube/texttube
+  if brew list --formula texttube >/dev/null 2>&1; then
+    HOMEBREW_NO_INSTALL_CLEANUP=1 brew reinstall --build-from-source local/texttube/texttube
+  else
+    HOMEBREW_NO_INSTALL_CLEANUP=1 brew install --build-from-source local/texttube/texttube
+  fi
   ensure_ollama_service
   brew services start texttube
 }
