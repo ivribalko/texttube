@@ -14,5 +14,11 @@
 - Do not add automated tests unless project requirements change.
 - Use manual verification with `python3 -m py_compile texttube_app.py` and `bash -n texttube`.
 - Before pushing anything to a remote, test everything locally, including the relevant checks in the separate `../homebrew-texttube` formula repository.
+- For local Homebrew verification after the user manually commits and pushes an app change:
+  - Pin `../homebrew-texttube/Formula/texttube.rb` to the full app commit archive, set an explicit snapshot version ending in the short commit SHA, and update the archive SHA-256 checksum.
+  - Mirror that formula change into the active local tap at `$(brew --repo ivribalko/texttube)/Formula/texttube.rb` because Homebrew rejects formula paths outside registered taps.
+  - Run `brew style ivribalko/texttube/texttube` and `brew audit --strict ivribalko/texttube/texttube`.
+  - Install with `HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install --ignore-dependencies --build-from-source --no-ask ivribalko/texttube/texttube` so unrelated outdated dependencies are not upgraded.
+  - Verify the installed app matches the committed checkout, compile it with the installed virtualenv, run `bash -n` on the installed launcher, run `brew test`, inspect CLI help and service status, and confirm secrets, schedule, and cutoff timestamps were preserved.
 - For end-to-end subscription checks, an hourly automation run with verbose output redirected to a timestamped `var/logs/automation-runs/` file is an easy low-context test path.
 - Do not use numbered lists in Markdown files.
