@@ -56,7 +56,7 @@ This file is the canonical design reference for repository layout, component res
 - A subscription run computes the active window from the saved cutoff, defaulting the first run to the previous 24 hours, and advances the cutoff only after the run finishes.
 - For each candidate video, TextTube enriches metadata, skips probable Shorts based on duration, obtains transcript text, generates the summary, and sends Telegram output before continuing to the next video.
 - Unexpected per-video processing errors are downgraded to a generic fallback Telegram message so one bad video does not abort the rest of the subscription run.
-- Fatal run-level failures after `TextTubeApp` is initialized, including YouTube OAuth refresh failures, send a generic Telegram notification.
+- Fatal run-level failures after `TextTubeApp` is initialized send a Telegram notification. Google OAuth `invalid_grant` failures send an actionable reauthorization notice with the correct installed or checkout auth command, while other fatal failures remain generic.
 - When native captions are unavailable, TextTube starts the local `mlx-whisper` helper only when needed, waits for `/healthz`, transcribes chunked audio through the fixed local HTTP endpoint, and stops the helper during application cleanup.
 - Console `SIGINT` and `SIGTERM` converge on the shared application cleanup path, which closes the shared HTTP session, stops the managed `mlx-whisper` helper process group, and exits with code `130` for interrupts.
 - Error logs hide exception details by default and include full raw exception text only when verbose logging is enabled.
@@ -70,7 +70,7 @@ This file is the canonical design reference for repository layout, component res
 - Subscription processing deduplicates videos across channels and playlists and treats videos up to three minutes long as probable Shorts.
 - Subscription processing deduplicates by YouTube video ID only, so creator reuploads can still produce duplicate Telegram messages when YouTube assigns a new video ID and publish timestamp to the same content.
 - If transcript fetching, transcript fallback, or summary generation fails for a video, TextTube sends a generic Telegram failure message for that video.
-- If authentication, subscription traversal, or another run-level step fails after app initialization, TextTube sends a generic Telegram failure message. Notification failures are logged and do not replace the original failure.
+- If Google OAuth reports `invalid_grant`, TextTube tells the operator that authorization expired or was revoked, provides the appropriate auth command, and notes that the subscription window remains preserved. Other authentication, subscription traversal, and run-level failures send a generic Telegram failure message. Notification failures are logged and do not replace the original failure.
 - If a subscription run stops because it reached the default `--limit` of `100`, TextTube sends one final Telegram message noting that the run ended at that cap.
 
 ## External Dependencies

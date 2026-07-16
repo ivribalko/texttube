@@ -3,7 +3,7 @@
 macOS TextTube app summarizes recent videos from your YouTube subscriptions with a local Ollama model, filters out Shorts, uses local MLX Whisper audio-to-text when caption fallback is needed, and sends one Telegram message per video.
 
 If a video cannot be fully processed, TextTube keeps the subscription run moving and sends a generic fallback Telegram message for that video.
-If the whole run fails after app startup, such as a YouTube OAuth refresh failure, TextTube sends a generic Telegram failure message.
+If the whole run fails after app startup, TextTube sends a Telegram failure message. An expired or revoked Google authorization produces an actionable message with the correct auth command; other run-level failures remain generic.
 
 Design and runtime layout live in [ARCHITECTURE.md](ARCHITECTURE.md). Summarization instructions and output rules live in [SUMMARIZER.md](SUMMARIZER.md).
 

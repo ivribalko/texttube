@@ -52,6 +52,13 @@ LAST_SUBSCRIPTION_WINDOW_END_FILE = "last_subscription_window_end_utc.txt"
 MLX_WHISPER_LOG_FILE_NAME = "mlx-whisper-run.log"
 MLX_READY_TIMEOUT_SECONDS = 120
 TRANSCRIPT_LANGUAGE_SEPARATOR = ","
+GOOGLE_OAUTH_REAUTHORIZATION_ERROR_CODE = "invalid_grant"
+GENERIC_RUN_FAILURE_MESSAGE = "TextTube run failed."
+GOOGLE_OAUTH_REAUTHORIZATION_MESSAGE = (
+    "TextTube could not access YouTube because Google authorization expired or was revoked. "
+    "Run {auth_command} to reconnect YouTube. The next run will process the preserved "
+    "subscription window."
+)
 
 
 def log(message: str, *, essential: bool = False) -> None:
@@ -106,20 +113,20 @@ class TextTubeCli:
             return 130
         except FatalError as exc:
             log(f"fatal: {exc}", essential=True)
-            cls.notify_run_failure(app=app)
+            cls.notify_run_failure(app=app, error=exc)
             return 1
         except Exception as exc:
             log(f"fatal: unexpected error: {exception_log_message(exc)}", essential=True)
-            cls.notify_run_failure(app=app)
+            cls.notify_run_failure(app=app, error=exc)
             return 1
         finally:
             lifecycle.cleanup()
             lifecycle.restore_signal_handlers()
 
     @staticmethod
-    def notify_run_failure(*, app: "TextTubeApp | None") -> None:
+    def notify_run_failure(*, app: "TextTubeApp | None", error: Exception) -> None:
         if app is not None:
-            app.notify_run_failure()
+            app.notify_run_failure(error)
 
 class TextTubeApp:
     """Coordinates one full TextTube invocation across setup, fetching, and delivery."""
@@ -185,9 +192,13 @@ class TextTubeApp:
             return self.run_single_video(video_id)
         return self.run_subscriptions()
 
-    def notify_run_failure(self) -> None:
+    def notify_run_failure(self, error: Exception) -> None:
+        message = GENERIC_RUN_FAILURE_MESSAGE
+        if isinstance(error, GoogleOAuthReauthorizationRequired):
+            auth_command = "./texttube auth" if self.allow_manual_access_token else "texttube auth"
+            message = GOOGLE_OAUTH_REAUTHORIZATION_MESSAGE.format(auth_command=auth_command)
         try:
-            self.telegram.send_run_failure_message()
+            self.telegram.send_run_failure_message(message)
         except Exception:
             log("telegram run failure notification failed", essential=True)
 
@@ -546,13 +557,20 @@ class YouTubeClient:
             "refresh_token": self.config.google_refresh_token,
             "grant_type": "refresh_token",
         }
-        data = HttpJsonClient.request_json(
-            self.session,
-            "POST",
-            GOOGLE_TOKEN_URL,
-            timeout=REQUEST_TIMEOUT_SECONDS,
-            data=payload,
-        )
+        try:
+            data = HttpJsonClient.request_json(
+                self.session,
+                "POST",
+                GOOGLE_TOKEN_URL,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                data=payload,
+            )
+        except FatalError as exc:
+            if GOOGLE_OAUTH_REAUTHORIZATION_ERROR_CODE in str(exc):
+                raise GoogleOAuthReauthorizationRequired(
+                    "Google OAuth authorization expired or was revoked"
+                ) from exc
+            raise
         token = str(data.get("access_token", "")).strip()
         if not token:
             raise FatalError("Google OAuth refresh response did not include an access token")
@@ -1075,9 +1093,9 @@ class TelegramClient:
             raise TelegramFailure(f"Telegram send failed: HTTP {response.status_code}: {detail}")
         log("telegram send: ok")
 
-    def send_run_failure_message(self) -> None:
+    def send_run_failure_message(self, message: str) -> None:
         log("run failure: send telegram", essential=True)
-        self.send_message("TextTube run failed.")
+        self.send_message(message)
 
     def maybe_send_limit_reached_message(
         self,
@@ -1911,6 +1929,9 @@ class LazyMlxWhisperManager:
 
 class FatalError(Exception):
     """Fatal setup or API failure that should stop the whole run."""
+
+class GoogleOAuthReauthorizationRequired(FatalError):
+    """Google OAuth failure that requires the operator to authorize TextTube again."""
 
 class VideoFailure(Exception):
     """Per-video failure that should still allow later videos to continue."""
