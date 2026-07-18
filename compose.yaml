@@ -1,0 +1,55 @@
+name: texttube
+
+x-texttube-environment: &texttube-environment
+  GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID:?GOOGLE_OAUTH_CLIENT_ID is required}"
+  GOOGLE_OAUTH_CLIENT_SECRET: "${GOOGLE_OAUTH_CLIENT_SECRET:?GOOGLE_OAUTH_CLIENT_SECRET is required}"
+  OPENAI_API_KEY: "${OPENAI_API_KEY:?OPENAI_API_KEY is required}"
+  TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}"
+  TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID is required}"
+  TEXTTUBE_HOME: /data
+  TEXTTUBE_LIMIT: "${TEXTTUBE_LIMIT:-}"
+  TEXTTUBE_VERBOSE: "${TEXTTUBE_VERBOSE:-}"
+  TRANSCRIPT_LANGUAGES: "${TRANSCRIPT_LANGUAGES:-}"
+
+x-texttube-service: &texttube-service
+  image: ghcr.io/ivribalko/texttube:latest
+  pull_policy: always
+  environment: *texttube-environment
+  volumes:
+    - texttube-data:/data/var
+
+services:
+  auth:
+    image: ghcr.io/ivribalko/texttube:latest
+    pull_policy: always
+    entrypoint:
+      - python
+      - /app/texttube_auth.py
+    environment:
+      GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID:?GOOGLE_OAUTH_CLIENT_ID is required}"
+      GOOGLE_OAUTH_CLIENT_SECRET: "${GOOGLE_OAUTH_CLIENT_SECRET:?GOOGLE_OAUTH_CLIENT_SECRET is required}"
+      TEXTTUBE_HOME: /data
+    volumes:
+      - texttube-data:/data/var
+    profiles:
+      - auth
+    restart: "no"
+
+  app:
+    <<: *texttube-service
+    profiles:
+      - manual
+
+  scheduler:
+    <<: *texttube-service
+    entrypoint:
+      - python
+      - /app/texttube_scheduler.py
+    environment:
+      <<: *texttube-environment
+      CRON: "${CRON:-}"
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+volumes:
+  texttube-data:

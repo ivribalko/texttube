@@ -1,0 +1,14 @@
+# Builds one-shot services from the current repository source.
+
+x-texttube-local-service: &texttube-local-service
+  build:
+    context: .
+  image: texttube:local
+  pull_policy: never
+
+services:
+  auth:
+    <<: *texttube-local-service
+
+  app:
+    <<: *texttube-local-service

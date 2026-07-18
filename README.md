@@ -1,226 +1,182 @@
 # TextTube
 
-macOS TextTube app summarizes recent videos from your YouTube subscriptions with a local Ollama model, filters out Shorts, uses local MLX Whisper audio-to-text when caption fallback is needed, and sends one Telegram message per video.
+TextTube watches recent YouTube subscription uploads, creates concise summaries with OpenAI, and sends one Telegram message per processed video. Docker Compose pulls the public multi-platform image from GitHub Container Registry and provides persistent scheduling, manual runs, and one-shot Google authorization.
 
-If a video cannot be fully processed, TextTube keeps the subscription run moving and sends a generic fallback Telegram message for that video.
-If the whole run fails after app startup, TextTube sends a Telegram failure message. An expired or revoked Google authorization produces an actionable message with the correct auth command; other run-level failures remain generic.
-
-Design and runtime layout live in [ARCHITECTURE.md](ARCHITECTURE.md). Summarization instructions and output rules live in [SUMMARIZER.md](SUMMARIZER.md).
+See [ARCHITECTURE.md](ARCHITECTURE.md) for processing rules, failure behavior, and component design. The transcript-summary prompt is [SUMMARIZER.md](SUMMARIZER.md).
 
 ## Requirements
 
-- Python 3.10+ available as `python3` for checkout runs. The Homebrew package uses `python@3.14`.
-- Homebrew for installed scheduled runs.
-- Ollama available on `127.0.0.1:11434`. Checkout runs only check readiness; installed init starts the Homebrew-managed `ollama` service when available.
-- `ffmpeg` installed on the Mac host.
-- Telegram bot token and chat ID.
-- Google OAuth client credentials and refresh token for scheduled subscription runs, or a short-lived `YOUTUBE_ACCESS_TOKEN` environment variable for manual checkout runs.
+- Docker Engine with Docker Compose
+- An OpenAI API key with API billing enabled
+- A Telegram bot token and target chat ID
+- A Google Cloud project with YouTube Data API v3 enabled
+- Google OAuth credentials with application type `TVs and Limited Input devices`
 
-Python dependency versions are pinned in [requirements.txt](requirements.txt) for both checkout runs and the Homebrew package.
+All inference runs through OpenAI using the official OpenAI Python SDK. The container does not download or run model weights.
 
-## Secrets
+## Prepare Google OAuth Credentials
 
-Run interactive init to create `.secrets` for the active runtime.
+In the [Google Cloud console](https://console.cloud.google.com/):
 
-For Homebrew installs:
+- [Enable YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com).
+- [Configure the OAuth consent screen](https://console.cloud.google.com/auth/branding) and [add the Google account as a test user](https://console.cloud.google.com/auth/audience) when the app remains in testing.
+- [Create an OAuth client ID](https://console.cloud.google.com/auth/clients) with application type [`TVs and Limited Input devices`](https://developers.google.com/youtube/v3/guides/auth/devices).
+- Supply its client ID and client secret through the [Compose environment](compose.yaml).
 
-```sh
-texttube init
-```
+[Desktop-app OAuth credentials do not work with the device authorization service](https://developers.google.com/youtube/v3/guides/auth/devices).
 
-For checkout runs:
+## Authorize YouTube
 
-```sh
-./texttube init
-```
-
-Init asks for Telegram and Google OAuth values, opens Google OAuth in a browser, and writes `GOOGLE_OAUTH_REFRESH_TOKEN` automatically. It never asks you to paste the refresh token.
-
-`YOUTUBE_ACCESS_TOKEN` is optional only as a shell environment variable for repo checkout manual runs through `./texttube` or `./texttube run`. `.secrets` and scheduled service runs ignore it and continue to use the refresh-token flow.
-
-Optional one-off or service-level model overrides:
-
-- `OLLAMA_MODEL` overrides the default summarization model, which is `gemma4:e4b-mlx`.
-- `MLX_WHISPER_MODEL` overrides the default audio-to-text model used for caption fallback, which is `mlx-community/whisper-large-v3-turbo`.
-- `TRANSCRIPT_LANGUAGES` sets the preferred native caption languages in order, comma-separated, for example `en,es`.
-- `TEXTTUBE_LIMIT` sets the default per-run video limit when `--limit` is not passed.
-- `TEXTTUBE_VERBOSE` sets the default log verbosity when `--verbose` is not passed. Only the exact value `true` enables it; every other value disables it.
-
-## Homebrew Install
-
-Install the scheduled TextTube service from the public Homebrew tap:
+Run the one-shot authorization service from the repository root:
 
 ```sh
-brew install ivribalko/texttube/texttube
+docker compose --file compose.yaml --file compose.local.yaml \
+  --profile auth run --build --rm auth
 ```
 
-Initialize Homebrew runtime secrets and schedule:
+Open the displayed Google verification URL on any phone or computer, enter the displayed code, and approve YouTube read-only access. The container polls Google at the requested interval and then stores the refresh token with owner-only permissions in the managed `texttube-data` volume. The refresh token is never printed or placed in a Compose environment variable.
+
+Run the same command again whenever Google authorization expires or is revoked. No callback port, public domain, workstation helper, or `.secrets` file is required.
+
+Start the stack after authorization. Compose pulls `ghcr.io/ivribalko/texttube:latest`. Only the persistent Python `scheduler` service starts by default. It waits for each `CRON` occurrence, prevents overlapping runs with a file lock, and launches TextTube as an isolated process.
+
+The `app` and `auth` services belong to profiles, so starting the stack does not trigger an extra subscription run or authorization session.
+
+## Compose Commands
+
+Pull the latest published image:
 
 ```sh
-texttube init
+docker compose pull
 ```
 
-Installed init writes only under `$(brew --prefix)/var/texttube`, including `.secrets` and `service.cron`, then restarts the Homebrew-managed TextTube service. The service schedule uses a standard five-field cron expression such as `0 18 * * *`.
-
-The packaged service uses:
-
-- a private Homebrew-managed virtualenv under `$(brew --prefix)/var/texttube/venv`
-- `$(brew --prefix)/var/texttube/.secrets` for runtime secrets
-- `$(brew --prefix)/var/texttube/service.cron` for the Homebrew service schedule
-- `$(brew --prefix)/var/texttube/var/logs/texttube.log` for scheduled-run and per-run helper logs
-- `$(brew --prefix)/var/texttube/var/state/last_subscription_window_end_utc.txt` for the last successful subscription-run cutoff
-- `$(brew --prefix)/var/texttube/var` for runtime artifacts, including single-video transcript and audio cache reuse under `var/cache/`
-
-Manual service control:
+Recreate the scheduler with the latest image:
 
 ```sh
-brew services info ollama
+docker compose up --detach --pull always
+```
+
+Run one subscription pass:
+
+```sh
+docker compose --file compose.yaml --file compose.local.yaml \
+  --profile manual run --build --rm app
+```
+
+Run one video with cache reuse and verbose logging:
+
+```sh
+docker compose --file compose.yaml --file compose.local.yaml \
+  --profile manual run --build --rm app \
+  --video "https://www.youtube.com/watch?v=VIDEO_ID" --cache --verbose
+```
+
+Run without the default 100-message limit:
+
+```sh
+docker compose --file compose.yaml --file compose.local.yaml \
+  --profile manual run --build --rm app --limit 0
+```
+
+## Logs
+
+The scheduler and every application process it launches share the `scheduler` service’s standard output and error streams. Follow them with timestamps:
+
+```sh
+docker compose logs --follow --timestamps scheduler
+```
+
+Read logs retained for all existing Compose service containers:
+
+```sh
+docker compose logs --timestamps
+```
+
+Manual `app` and authorization `auth` runs write directly to their attached terminal. The documented commands use `--rm`, so Docker removes each one-shot container and its logs when the command finishes. Docker’s configured logging driver retains scheduler output; the managed data volume never contains log files.
+
+## Runtime Configuration
+
+Compose supplies application values through the process environment. Command-line flags override overlapping runtime defaults. `TEXTTUBE_HOME` is fixed at `/data`, and the built-in `SUMMARIZER.md` is used.
+
+`CRON` is required when starting the scheduler but is not required for manual or authorization runs. It must be a standard five-field cron expression and is evaluated in UTC; shortcuts such as `@daily` are not accepted.
+
+The model names are application constants rather than operator settings:
+
+- `gpt-5.6-luna` generates transcript and description summaries.
+- `gpt-transcribe` transcribes fallback audio.
+
+## Important Processing Boundaries
+
+- Videos up to three minutes long are treated as probable Shorts and skipped.
+- Videos longer than 60 minutes may use native captions but never download or transcribe audio.
+- A failed transcript path falls back to a title-guided summary of the cleaned video description.
+- The subscription cutoff advances after the run finishes, including runs where individual videos use fallbacks.
+- Scheduled runs never overlap.
+
+The complete processing and failure rules are canonical in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Runtime Data
+
+Compose persists credentials, state, and caches in the managed `texttube-data` volume mounted at `/data/var`.
+
+- `/data/var/state/google_oauth_refresh_token` stores the Google refresh token with owner-only permissions.
+- `/data/var/state/last_subscription_window_end_utc.txt` stores the completed subscription cutoff.
+- `/data/var/cache/` stores transcript and audio entries created by manual runs with `--cache`.
+- `/data/var/texttube.lock` enforces singleton scheduled runs.
+
+Removing the OAuth token requires running the authorization service again. Deleting the cutoff file resets the next subscription window to the previous 24 hours; the lock-safe maintenance command is documented in [AGENTS.md](AGENTS.md).
+
+## Validation
+
+Run all validation in Docker. No local Python installation or execution is required.
+
+```sh
+OPENAI_API_KEY=check \
+TELEGRAM_BOT_TOKEN=check \
+TELEGRAM_CHAT_ID=check \
+GOOGLE_OAUTH_CLIENT_ID=check \
+GOOGLE_OAUTH_CLIENT_SECRET=check \
+CRON='your five-field expression' \
+docker compose --profile auth --profile manual config --quiet
 ```
 
 ```sh
-brew services info texttube
+docker build --tag texttube:check .
 ```
 
 ```sh
-brew services restart texttube
+docker run --rm --entrypoint python texttube:check \
+  -m py_compile \
+  /app/texttube_app.py \
+  /app/texttube_auth.py \
+  /app/texttube_scheduler.py
 ```
 
-```sh
-brew services stop texttube
-```
+## Container Publication
 
-## Checkout Setup
+A push to `main` runs [.github/workflows/publish-container.yaml](.github/workflows/publish-container.yaml). GitHub Actions builds one `linux/amd64` and `linux/arm64` image manifest and publishes it to `ghcr.io/ivribalko/texttube` with:
 
-Checkout commands are local-only. `./texttube` never installs, configures, starts, stops, taps, untaps, or trusts Homebrew packages or services, and it only changes files inside the repository checkout.
+- `latest`, consumed by `compose.yaml`
+- `sha-<commit>`, an immutable source-revision tag
 
-Create or update checkout `.secrets`:
+GitHub creates the package as private on its first publication even though this repository is public. After the first successful workflow run:
 
-```sh
-./texttube init
-```
+- Open the `texttube` package settings under the `ivribalko` GitHub account.
+- Change package visibility to **Public**.
+- Re-run the workflow or pull `ghcr.io/ivribalko/texttube:latest` anonymously to verify public access.
 
-Run one checkout pass:
+The visibility change is permanent. Later pushes update the already-public package without registry credentials in the deployment environment.
 
-```sh
-./texttube run
-```
+## License
 
-Checkout runs are not schedulable through `./texttube`; scheduling belongs to the Homebrew-installed service.
+TextTube is available under the [MIT License](LICENSE).
 
-Developers who need both repositories can clone them independently as siblings:
+## References
 
-```sh
-git clone https://github.com/ivribalko/texttube.git
-```
-
-```sh
-git clone https://github.com/ivribalko/homebrew-texttube.git
-```
-
-## OAuth Setup Notes
-
-Optional one-off access token flow:
-
-- use the [OAuth Playground](https://developers.google.com/oauthplayground/) with the `https://www.googleapis.com/auth/youtube.readonly` scope and:
-
-```sh
-YOUTUBE_ACCESS_TOKEN='your_oauth_playground_access_token' ./texttube --video 'https://www.youtube.com/watch?v=VIDEO_ID'
-```
-
-Durable refresh-token flow:
-
-- Enable YouTube Data API v3 and create OAuth client credentials for a desktop app in Google Cloud `https://console.cloud.google.com/apis/library`
-- In Google Cloud, add your Google account as a test user if the OAuth app is still in `Testing`: `https://console.cloud.google.com/auth/audience`
-- Use init or auth to create or renew the stored Google refresh token:
-
-```sh
-texttube auth
-```
-
-```sh
-./texttube auth
-```
-
-- The auth helper opens Google OAuth consent in a browser, listens only on `http://127.0.0.1:8080`, exchanges the callback code, and updates only `GOOGLE_OAUTH_REFRESH_TOKEN` in the active `.secrets` without printing tokens.
-
-Official docs:
-
+- [Publishing Docker images with GitHub Actions](https://docs.github.com/actions/tutorials/publish-packages/publish-docker-images)
+- [GitHub Container Registry](https://docs.github.com/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
 - [YouTube Data API Python quickstart](https://developers.google.com/youtube/v3/quickstart/python)
-- [Google OAuth 2.0 for iOS & Desktop Apps](https://developers.google.com/identity/protocols/oauth2/native-app)
-
-## Scheduled Run
-
-The single `texttube` Homebrew service uses the cron expression written by installed `texttube init` and lets Homebrew trigger the run directly.
-
-- `texttube init` asks for a standard five-field cron expression, for example `0 18 * * *`.
-- Each subscription run processes videos published between the previous successful subscription-run cutoff and the current run start, then records the new cutoff in `$(brew --prefix)/var/texttube/var/state/last_subscription_window_end_utc.txt`.
-- Duplicate Telegram messages are possible when a creator removes and reuploads the same content because YouTube gives the reupload a new video ID and publish timestamp.
-- Checkout manual subscription runs can bypass the saved cutoff once with `./texttube --reset-cutoff`; the scheduled Homebrew service does not use that override.
-
-## Manual Run
-
-Print top-level help:
-
-```sh
-./texttube --help
-```
-
-Runtime defaults can come from `.secrets` or the shell environment. For overlapping settings, command-line flags take precedence over environment variables, and environment variables take precedence over `.secrets`.
-Error logs hide exception details by default. Pass `--verbose` to print full exception text.
-
-Run one subscription pass from the repository checkout with no limit and a reset cutoff:
-
-```sh
-./texttube --limit 0 --reset-cutoff
-```
-
-The checkout launcher runs one TextTube pass when no subcommand is provided.
-For manual checkout runs, the launcher verifies Ollama is reachable on `127.0.0.1:11434` and exits with instructions when it is not.
-If `YOUTUBE_ACCESS_TOKEN` is set in the shell environment that launches `./texttube` or `./texttube run`, the checkout launcher uses it directly for YouTube API calls instead of refreshing `GOOGLE_OAUTH_REFRESH_TOKEN`. The token is not read from `.secrets`.
-
-Manual one-video run with cache reuse and verbose logging:
-
-```sh
-./texttube --video "https://www.youtube.com/watch?v=video_id" --cache --verbose
-```
-
-Preferred native caption selection comes from `TRANSCRIPT_LANGUAGES` in `.secrets` or the shell environment. For example, `TRANSCRIPT_LANGUAGES=en,en-US` makes TextTube try matching English native caption tracks before other available transcript languages and only fall back to the rest when no preferred match exists. If YouTube exposes an auto-generated transcript for the original spoken audio language and that language matches your list, TextTube promotes that language ahead of the rest of the fallback order while still preferring a manual transcript in that same language when available.
-When TextTube knows the selected native transcript language code, it passes that code to the local summary model explicitly so summaries stay in the transcript language more reliably.
-
-## Matrix Run
-
-- Re-run the same cached video across a full override matrix with a small `zsh` helper.
-- Use `""` in any override array to keep the default value for that run.
-- Use the exact value `"ollama list"` in `OLLAMA_MODELS` to expand to every locally installed Ollama model:
-
-```sh
-VIDEO="https://www.youtube.com/watch?v=video_id"
-OLLAMA_MODELS=("ollama list")
-MLX_WHISPER_MODELS=("" "mlx-community/whisper-large-v3")
-SUMMARIZER_PROMPTS=("" "SUMMARIZER.alt.md")
-
-resolved_ollama_models=()
-for requested_model in "${OLLAMA_MODELS[@]}"; do
-  if [[ "${requested_model}" == "ollama list" ]]; then
-    resolved_ollama_models+=("${(@f)$(ollama list | awk 'NR > 1 { print $1 }')}")
-  else
-    resolved_ollama_models+=("${requested_model}")
-  fi
-done
-
-for ollama_model in "${resolved_ollama_models[@]}"; do
-  for mlx_whisper_model in "${MLX_WHISPER_MODELS[@]}"; do
-    for summarizer_prompt in "${SUMMARIZER_PROMPTS[@]}"; do
-      (
-        unset OLLAMA_MODEL MLX_WHISPER_MODEL SUMMARIZER_MD
-        [[ -n "${ollama_model}" ]] && export OLLAMA_MODEL="${ollama_model}"
-        [[ -n "${mlx_whisper_model}" ]] && export MLX_WHISPER_MODEL="${mlx_whisper_model}"
-        [[ -n "${summarizer_prompt}" ]] && export SUMMARIZER_MD="${summarizer_prompt}"
-        printf 'Running with OLLAMA_MODEL=%q MLX_WHISPER_MODEL=%q SUMMARIZER_MD=%q\n' \
-          "${OLLAMA_MODEL}" "${MLX_WHISPER_MODEL}" "${SUMMARIZER_MD}"
-        ./texttube --video "${VIDEO}" --verbose --cache
-      )
-    done
-  done
-done
-```
+- [Google OAuth 2.0 for TVs and Limited-Input Devices](https://developers.google.com/youtube/v3/guides/auth/devices)
+- [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
+- [OpenAI transcription API](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create)
+- [Official OpenAI Python SDK](https://github.com/openai/openai-python)

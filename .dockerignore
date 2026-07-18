@@ -1,0 +1,8 @@
+# Send only immutable image inputs to the Docker builder.
+**
+!Dockerfile
+!requirements.txt
+!SUMMARIZER.md
+!texttube_app.py
+!texttube_auth.py
+!texttube_scheduler.py

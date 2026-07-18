@@ -1,47 +1,38 @@
 """Application entrypoint for TextTube.
 
-This file owns configuration, YouTube API access, transcript fetching, the
-local mlx-whisper helper server, Ollama calls, Telegram delivery, command-line
-behavior, run-level failure notifications, and subscription run state.
+This file owns configuration, YouTube API access, transcript fetching, OpenAI
+summarization and transcription, Telegram delivery, command-line behavior,
+run-level failure notifications, and subscription run state.
 """
 
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import html
 import json
 import os
 import re
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
 import time as time_module
-from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
-from urllib import error, request
-from urllib.parse import urlparse
 
 YOUTUBE_API_BASE_URL = "https://www.googleapis.com/youtube/v3"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
-OLLAMA_BASE_URL = "http://127.0.0.1:11434"
-OLLAMA_MODEL = "gemma4:e4b-mlx"
-MLX_WHISPER_HOST = "127.0.0.1"
-MLX_WHISPER_PORT = 50061
-MLX_WHISPER_BASE_URL = f"http://{MLX_WHISPER_HOST}:{MLX_WHISPER_PORT}"
+OPENAI_SUMMARY_MODEL = "gpt-5.6-luna"
+OPENAI_TRANSCRIPTION_MODEL = "gpt-transcribe"
 REQUEST_TIMEOUT_SECONDS = 30
-MLX_TRANSCRIBE_WORKERS = 4
-LOCAL_MODEL_TIMEOUT_SECONDS = 1800
+OPENAI_SUMMARY_TIMEOUT_SECONDS = 180
+OPENAI_TRANSCRIPTION_TIMEOUT_SECONDS = 1800
+MAX_AUDIO_TRANSCRIPTION_DURATION_SECONDS = 60 * 60
 YOUTUBE_PAGE_SIZE = 50
-MLX_WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
 CACHE_DIR_NAME = "cache"
 AUDIO_CACHE_EXTENSION = ".m4a"
 TRANSCRIPT_CACHE_EXTENSION = ".txt"
@@ -49,16 +40,28 @@ VERBOSE_LOGGING = False
 DEFAULT_VIDEO_LIMIT = 100
 SUBSCRIPTION_STATE_DIR_NAME = "state"
 LAST_SUBSCRIPTION_WINDOW_END_FILE = "last_subscription_window_end_utc.txt"
-MLX_WHISPER_LOG_FILE_NAME = "mlx-whisper-run.log"
-MLX_READY_TIMEOUT_SECONDS = 120
+GOOGLE_OAUTH_REFRESH_TOKEN_FILE = "google_oauth_refresh_token"
 TRANSCRIPT_LANGUAGE_SEPARATOR = ","
 GOOGLE_OAUTH_REAUTHORIZATION_ERROR_CODE = "invalid_grant"
+GOOGLE_OAUTH_AUTH_COMMAND = (
+    "docker compose --file compose.yaml --file compose.local.yaml "
+    "--profile auth run --build --rm auth"
+)
 GENERIC_RUN_FAILURE_MESSAGE = "TextTube run failed."
 GOOGLE_OAUTH_REAUTHORIZATION_MESSAGE = (
     "TextTube could not access YouTube because Google authorization expired or was revoked. "
     "Run {auth_command} to reconnect YouTube. The next run will process the preserved "
     "subscription window."
 )
+DESCRIPTION_SUMMARIZER_PROMPT = """Summarize a YouTube video from its title and description.
+
+Return one compact plain-text paragraph of 1 to 3 short sentences in the
+description's dominant language. Keep only facts that describe the video's
+actual subject. Remove every URL, domain, social handle, sponsor or affiliate
+message, discount, merchandise pitch, subscription request, channel boilerplate,
+contact detail, and other unrelated information. Do not mention that the source
+was a title or description. If no relevant facts remain, return exactly:
+No essential facts."""
 
 
 def log(message: str, *, essential: bool = False) -> None:
@@ -83,13 +86,33 @@ class TextTubeCli:
 
     @staticmethod
     def parse_args() -> argparse.Namespace:
-        parser = argparse.ArgumentParser(add_help=False)
+        parser = argparse.ArgumentParser(
+            description="Summarize YouTube subscriptions or one selected video."
+        )
         target_group = parser.add_mutually_exclusive_group()
-        target_group.add_argument("--limit", type=int, default=None)
-        target_group.add_argument("--video", default="")
-        parser.add_argument("--cache", action="store_true")
-        parser.add_argument("--verbose", action="store_true")
-        parser.add_argument("--reset-cutoff", action="store_true")
+        target_group.add_argument(
+            "--limit",
+            type=int,
+            default=None,
+            metavar="N",
+            help="maximum videos to process; 0 means unlimited",
+        )
+        target_group.add_argument(
+            "--video",
+            default="",
+            metavar="URL_OR_ID",
+            help="process one YouTube video instead of subscriptions",
+        )
+        parser.add_argument(
+            "--cache",
+            action="store_true",
+            help="reuse and update transcript and audio caches",
+        )
+        parser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="show detailed progress and errors",
+        )
         return parser.parse_args()
 
     @classmethod
@@ -100,7 +123,7 @@ class TextTubeCli:
         app: TextTubeApp | None = None
         try:
             args = cls.parse_args()
-            ConfigLoader.apply_runtime_defaults(args, RuntimePaths.discover().secrets_path)
+            ConfigLoader.apply_runtime_defaults(args)
             VERBOSE_LOGGING = args.verbose
             log("startup: parse args")
             if args.limit < 0:
@@ -137,14 +160,8 @@ class TextTubeApp:
         self.paths = RuntimePaths.discover()
         self.session = AppEnvironment.import_requests().Session()
         self.lifecycle.add_cleanup(self.session.close)
-        self.allow_manual_access_token = os.environ.get("TEXTTUBE_MANUAL_RUN", "").strip() == "1"
-        if self.args.reset_cutoff and not self.allow_manual_access_token:
-            raise FatalError("--reset-cutoff is available only for repo checkout manual runs.")
-        if self.args.reset_cutoff and self.args.video:
-            raise FatalError("--reset-cutoff applies only to subscription runs, not --video.")
         self.config = ConfigLoader.load_config(
-            self.paths.secrets_path,
-            allow_manual_access_token=self.allow_manual_access_token,
+            self.paths.google_refresh_token_path(),
         )
         prompt_path = self.paths.prompt_path()
         if not prompt_path.exists():
@@ -153,40 +170,38 @@ class TextTubeApp:
         if not self.system_prompt:
             raise FatalError(f"Summarizer prompt file is empty: {prompt_path}")
 
-        self.model = ConfigLoader.resolve_ollama_model(self.paths.secrets_path)
-        self.mlx_whisper_model = ConfigLoader.resolve_mlx_whisper_model(self.paths.secrets_path)
-        self.transcript_language_preferences = ConfigLoader.resolve_transcript_language_preferences(
-            self.paths.secrets_path
+        self.transcript_language_preferences = (
+            ConfigLoader.resolve_transcript_language_preferences()
         )
-        self.mlx_whisper_manager = LazyMlxWhisperManager(self.paths.state_root)
-        self.lifecycle.add_cleanup(self.mlx_whisper_manager.stop)
         self.youtube = YouTubeClient(self.session, self.config)
-        self.ollama = OllamaClient(self.session, self.model, self.system_prompt)
+        openai_sdk = AppEnvironment.import_openai().OpenAI(
+            api_key=self.config.openai_api_key,
+            max_retries=0,
+        )
+        self.lifecycle.add_cleanup(openai_sdk.close)
+        self.openai = OpenAIClient(
+            openai_sdk,
+            self.system_prompt,
+        )
         self.telegram = TelegramClient(self.session, self.config)
         self.transcript_summarizer = TranscriptSummarizer(
-            self.ollama,
+            self.openai,
             self.telegram,
-            self.mlx_whisper_model,
-            self.mlx_whisper_manager,
             self.transcript_language_preferences,
         )
 
     def run(self) -> int:
         log("startup: load prompt", essential=True)
         log(f"prompt: {self.paths.display_path(self.paths.prompt_path())}")
-        log(f"model: {self.model}")
+        log(
+            f"openai: summary={OPENAI_SUMMARY_MODEL} "
+            f"transcription={OPENAI_TRANSCRIPTION_MODEL}"
+        )
         if self.transcript_language_preferences:
             log(
                 "transcript languages: "
                 f"{', '.join(self.transcript_language_preferences)}"
             )
-        log(
-            "mlx whisper: "
-            f"{MLX_WHISPER_BASE_URL} model={self.mlx_whisper_model} "
-            f"transcribe_workers={MLX_TRANSCRIBE_WORKERS}"
-        )
-        log("startup: warm ollama model", essential=True)
-        self.ollama.preload_model()
         video_id = ValueParser.parse_youtube_video_id(self.args.video) if self.args.video else None
         if video_id:
             return self.run_single_video(video_id)
@@ -195,8 +210,9 @@ class TextTubeApp:
     def notify_run_failure(self, error: Exception) -> None:
         message = GENERIC_RUN_FAILURE_MESSAGE
         if isinstance(error, GoogleOAuthReauthorizationRequired):
-            auth_command = "./texttube auth" if self.allow_manual_access_token else "texttube auth"
-            message = GOOGLE_OAUTH_REAUTHORIZATION_MESSAGE.format(auth_command=auth_command)
+            message = GOOGLE_OAUTH_REAUTHORIZATION_MESSAGE.format(
+                auth_command=GOOGLE_OAUTH_AUTH_COMMAND
+            )
         try:
             self.telegram.send_run_failure_message(message)
         except Exception:
@@ -227,10 +243,7 @@ class TextTubeApp:
     def run_subscriptions(self) -> int:
         log("startup: resolve youtube token", essential=True)
         self.youtube.access_token()
-        window_start, window_end = SubscriptionState.subscription_window(
-            self.paths.state_root,
-            ignore_saved_window=self.args.reset_cutoff,
-        )
+        window_start, window_end = SubscriptionState.subscription_window(self.paths.state_root)
         log(
             f"subscription window utc: {window_start.isoformat()} -> {window_end.isoformat()}",
             essential=True,
@@ -286,21 +299,25 @@ class TranscriptSummarizer:
 
     def __init__(
         self,
-        ollama: OllamaClient,
+        openai: "OpenAIClient",
         telegram: TelegramClient,
-        mlx_whisper_model: str,
-        mlx_whisper_manager: LazyMlxWhisperManager,
         transcript_language_preferences: tuple[str, ...],
     ):
-        self.ollama = ollama
+        self.openai = openai
         self.telegram = telegram
-        self.mlx_whisper_model = mlx_whisper_model
-        self.mlx_whisper_manager = mlx_whisper_manager
         self.transcript_language_preferences = transcript_language_preferences
 
     @staticmethod
     def is_probable_short(video: Video) -> bool:
         return video.duration_seconds is not None and video.duration_seconds <= 180
+
+    @staticmethod
+    def exceeds_audio_transcription_limit(video: Video) -> bool:
+        """Return whether audio fallback is forbidden by the duration limit."""
+        return (
+            video.duration_seconds is not None
+            and video.duration_seconds > MAX_AUDIO_TRANSCRIPTION_DURATION_SECONDS
+        )
 
     def process_video(
         self,
@@ -314,70 +331,96 @@ class TranscriptSummarizer:
             return False
 
         log(f"process {video.video_id}: {video.channel_title}: {video.title}", essential=True)
+        summary = ""
         try:
-            transcript_result = None
-            if transcript_cache_path and transcript_cache_path.exists():
-                cached_transcript = transcript_cache_path.read_text(encoding="utf-8").strip()
-                if cached_transcript:
-                    transcript_result = TranscriptResult(text=cached_transcript)
-                    log(f"transcript cache: hit {transcript_cache_path.name}")
-            if transcript_result is None:
-                try:
-                    log(f"process {video.video_id}: native transcript", essential=True)
-                    transcript_result = TranscriptFetcher.fetch_transcript(
-                        video.video_id,
-                        preferred_languages=self.transcript_language_preferences,
-                    )
-                except VideoFailure as transcript_exc:
-                    log(f"transcript fallback {video.video_id}: {transcript_exc}")
-                    self.mlx_whisper_manager.ensure_started()
-                    try:
-                        transcript_result = MlxWhisperService.fetch_audio_transcript(
-                            video.video_id,
-                            self.mlx_whisper_model,
-                            audio_cache_path=audio_cache_path,
-                        )
-                    except VideoFailure as audio_exc:
-                        raise VideoFailure(f"{transcript_exc}; {audio_exc}") from audio_exc
-                if transcript_cache_path:
-                    transcript = transcript_result.text.strip()
-                    if transcript:
-                        transcript_cache_path.parent.mkdir(parents=True, exist_ok=True)
-                        transcript_cache_path.write_text(f"{transcript}\n", encoding="utf-8")
-                        log(f"transcript cache: stored {transcript_cache_path.name}")
-
+            transcript_result = self.fetch_transcript(
+                video,
+                audio_cache_path=audio_cache_path,
+                transcript_cache_path=transcript_cache_path,
+            )
             log(f"process {video.video_id}: summarize", essential=True)
-            summary = self.ollama.summarize_transcript(
+            summary = self.openai.summarize_transcript(
                 transcript_result.text,
                 language_code=transcript_result.language_code,
             )
-            log(f"process {video.video_id}: format message")
-            message = TelegramClient.format_message(video, summary)
-            log(f"process {video.video_id}: send telegram", essential=True)
-            self.telegram.send_message(message)
-            log(f"sent {video.video_id}: summarized")
-            return True
-        except VideoFailure:
-            fallback_body = "Summary unavailable."
-            log(f"process {video.video_id}: format failure message")
-            message = TelegramClient.format_message(video, fallback_body)
-            log(f"process {video.video_id}: send failure telegram", essential=True)
-            self.telegram.send_message(message)
-            log(f"sent {video.video_id}: fallback description")
-            return True
-        except Exception as exc:
+        except VideoFailure as exc:
             log(
-                f"process {video.video_id}: unexpected error, using fallback: "
+                f"process {video.video_id}: transcript summary unavailable: "
                 f"{exception_log_message(exc)}",
                 essential=True,
             )
-            fallback_body = "Summary unavailable."
-            log(f"process {video.video_id}: format failure message")
-            message = TelegramClient.format_message(video, fallback_body)
-            log(f"process {video.video_id}: send failure telegram", essential=True)
-            self.telegram.send_message(message)
-            log(f"sent {video.video_id}: fallback description")
-            return True
+        except Exception as exc:
+            log(
+                f"process {video.video_id}: unexpected summary error, using description: "
+                f"{exception_log_message(exc)}",
+                essential=True,
+            )
+
+        used_description = False
+        if not summary:
+            used_description = True
+            log(f"process {video.video_id}: summarize description fallback", essential=True)
+            try:
+                summary = self.openai.summarize_description(video.title, video.description)
+            except VideoFailure as exc:
+                log(
+                    f"process {video.video_id}: description summary unavailable: "
+                    f"{exception_log_message(exc)}",
+                    essential=True,
+                )
+                summary = DescriptionCleaner.clean(video.description)
+
+        log(f"process {video.video_id}: format message")
+        message = TelegramClient.format_message(video, summary)
+        log(f"process {video.video_id}: send telegram", essential=True)
+        self.telegram.send_message(message)
+        result_label = "description fallback" if used_description else "summarized"
+        log(f"sent {video.video_id}: {result_label}")
+        return True
+
+    def fetch_transcript(
+        self,
+        video: "Video",
+        *,
+        audio_cache_path: Path | None,
+        transcript_cache_path: Path | None,
+    ) -> "TranscriptResult":
+        """Resolve a cached, native-caption, or OpenAI audio transcript."""
+        if transcript_cache_path and transcript_cache_path.exists():
+            cached_transcript = transcript_cache_path.read_text(encoding="utf-8").strip()
+            if cached_transcript:
+                log(f"transcript cache: hit {transcript_cache_path.name}")
+                return TranscriptResult(text=cached_transcript)
+
+        try:
+            log(f"process {video.video_id}: native transcript", essential=True)
+            transcript_result = TranscriptFetcher.fetch_transcript(
+                video.video_id,
+                preferred_languages=self.transcript_language_preferences,
+            )
+        except VideoFailure as transcript_exc:
+            log(f"transcript fallback {video.video_id}: {transcript_exc}")
+            if self.exceeds_audio_transcription_limit(video):
+                raise VideoFailure(
+                    f"{transcript_exc}; audio transcription skipped because video exceeds "
+                    "60 minutes"
+                ) from transcript_exc
+            try:
+                transcript_result = OpenAIAudioTranscriber.fetch_audio_transcript(
+                    self.openai.client,
+                    video.video_id,
+                    audio_cache_path=audio_cache_path,
+                )
+            except VideoFailure as audio_exc:
+                raise VideoFailure(f"{transcript_exc}; {audio_exc}") from audio_exc
+
+        if transcript_cache_path:
+            transcript = transcript_result.text.strip()
+            if transcript:
+                transcript_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                transcript_cache_path.write_text(f"{transcript}\n", encoding="utf-8")
+                log(f"transcript cache: stored {transcript_cache_path.name}")
+        return transcript_result
 
 class YouTubeClient:
     """Resolves YouTube auth and exposes the app's video-fetching workflows."""
@@ -389,7 +432,7 @@ class YouTubeClient:
 
     def access_token(self) -> str:
         if self._access_token is None:
-            self._access_token = self._resolve_access_token()
+            self._access_token = self._refresh_access_token()
         return self._access_token
 
     def fetch_video(self, video_id: str) -> Video:
@@ -576,12 +619,6 @@ class YouTubeClient:
             raise FatalError("Google OAuth refresh response did not include an access token")
         log("oauth refresh: ok")
         return token
-
-    def _resolve_access_token(self) -> str:
-        if self.config.youtube_access_token:
-            log("oauth access token: using YOUTUBE_ACCESS_TOKEN")
-            return self.config.youtube_access_token
-        return self._refresh_access_token()
 
     def _get(self, endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self.access_token()}"}
@@ -884,150 +921,84 @@ class TranscriptFetcher:
             ) from last_error
         raise VideoFailure("transcript unavailable: transcript was empty")
 
-class OllamaClient:
-    """Wraps Ollama warmup, install-on-miss, and transcript summarization calls."""
+class OpenAIClient:
+    """Calls OpenAI's low-cost text model for transcript and description summaries."""
 
-    def __init__(self, session: Any, model: str, system_prompt: str):
-        self.session = session
-        self.model = model
+    def __init__(self, client: Any, system_prompt: str):
+        self.client = client
         self.system_prompt = system_prompt
 
-    @staticmethod
-    def ollama_model_missing(status_code: int, detail: str, model: str) -> bool:
-        if status_code != 404:
-            return False
-        normalized_detail = detail.lower()
-        normalized_model = model.lower()
-        return "not found" in normalized_detail and normalized_model in normalized_detail
-
-    @staticmethod
-    def ensure_model_installed(model: str) -> None:
-        ollama_bin = shutil.which("ollama")
-        if not ollama_bin:
-            raise FatalError(
-                f"Ollama model install failed for {model}: missing 'ollama' command in PATH"
-            )
-
-        log(f"ollama install: pull {model}", essential=True)
+    def generate(self, prompt: str, *, instructions: str) -> str:
+        """Generate one plain-text response through the official Responses client."""
+        openai_module = AppEnvironment.import_openai()
         try:
-            completed = subprocess.run(
-                [ollama_bin, "pull", model],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=3600,
+            response = self.client.with_options(
+                timeout=OPENAI_SUMMARY_TIMEOUT_SECONDS,
+            ).responses.create(
+                model=OPENAI_SUMMARY_MODEL,
+                instructions=instructions,
+                input=prompt,
+                max_output_tokens=500,
+                store=False,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise FatalError(f"Ollama model install timed out for {model}") from exc
-        except subprocess.CalledProcessError as exc:
-            output = (exc.stderr or exc.stdout or str(exc)).strip().splitlines()
-            reason = output[-1] if output else str(exc)
-            raise FatalError(f"Ollama model install failed for {model}: {reason[:300]}") from exc
-
-        output = (completed.stderr or completed.stdout or "").strip()
-        if output:
-            log(f"ollama install result model={model}:\n{output}")
-        log(f"ollama install: ready {model}", essential=True)
-
-    def generate(self, prompt: str) -> OllamaGenerateResult:
-        requests_module = AppEnvironment.import_requests()
-        url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate"
-        payload = {
-            "model": self.model,
-            "system": self.system_prompt,
-            "prompt": prompt,
-            "stream": False,
-            "think": False,
-            "options": {"temperature": 0},
-        }
-        try:
-            response = self.session.post(url, json=payload, timeout=LOCAL_MODEL_TIMEOUT_SECONDS)
-        except requests_module.RequestException as exc:
-            raise VideoFailure(f"Ollama request failed for {self.model}: {exc}") from exc
-
-        if response.status_code != 200:
-            detail = response.text[:300].replace("\n", " ")
+        except openai_module.OpenAIError as exc:
             raise VideoFailure(
-                f"Ollama request failed for {self.model}: HTTP {response.status_code}: {detail}"
-            )
+                f"OpenAI request failed for {OPENAI_SUMMARY_MODEL}: "
+                f"{exception_log_message(exc)}"
+            ) from exc
 
-        try:
-            data = response.json()
-        except json.JSONDecodeError as exc:
-            raise VideoFailure(f"Ollama returned invalid JSON for {self.model}") from exc
-
-        generated = str(data.get("response", ""))
-        if not generated.strip():
-            raise VideoFailure(f"Ollama returned an empty response for {self.model}")
-        return OllamaGenerateResult(response=generated)
-
-    def preload_model(self) -> None:
-        requests_module = AppEnvironment.import_requests()
-        url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/generate"
-        payload = {
-            "model": self.model,
-            "prompt": "ping",
-            "stream": False,
-            "think": False,
-            "options": {"temperature": 0},
-        }
-        started_at = time_module.monotonic()
-        did_install = False
-        while True:
-            try:
-                response = self.session.post(url, json=payload, timeout=LOCAL_MODEL_TIMEOUT_SECONDS)
-            except requests_module.RequestException as exc:
-                raise FatalError(f"Ollama warmup failed for {self.model}: {exc}") from exc
-
-            if response.status_code == 200:
-                break
-
-            detail = response.text[:300].replace("\n", " ")
-            if not did_install and self.ollama_model_missing(response.status_code, detail, self.model):
-                self.ensure_model_installed(self.model)
-                did_install = True
-                continue
-            raise FatalError(
-                f"Ollama warmup failed for {self.model}: "
-                f"HTTP {response.status_code}: {detail}"
-            )
-
-        try:
-            response.json()
-        except json.JSONDecodeError as exc:
-            raise FatalError(f"Ollama warmup returned invalid JSON for {self.model}") from exc
-
-        log(
-            "ollama warmup: "
-            f"model={self.model} elapsed={format_duration(time_module.monotonic() - started_at)}",
-            essential=True,
-        )
+        generated = str(response.output_text or "").strip()
+        if not generated:
+            raise VideoFailure(f"OpenAI returned no text for {OPENAI_SUMMARY_MODEL}")
+        return generated
 
     def summarize_transcript(self, transcript: str, *, language_code: str = "") -> str:
+        """Summarize transcript text using the canonical repository prompt."""
         prompt = self.build_summary_prompt(transcript, language_code=language_code)
+        if not prompt:
+            raise VideoFailure("summary unavailable: transcript was empty")
+        return self.summarize(prompt, instructions=self.system_prompt)
+
+    def summarize_description(self, title: str, description: str) -> str:
+        """Summarize and clean video metadata when transcript summarization fails."""
+        cleaned_description = DescriptionCleaner.prepare_for_model(description)
+        if not cleaned_description:
+            raise VideoFailure("description summary unavailable: description was empty")
+        prompt = f"Title: {title.strip()}\n\nDescription:\n{cleaned_description}"
+        summary = self.summarize(prompt, instructions=DESCRIPTION_SUMMARIZER_PROMPT)
+        link_free_summary = DescriptionCleaner.prepare_for_model(summary)
+        if not link_free_summary:
+            raise VideoFailure("description summary unavailable: only links remained")
+        return re.sub(r"\s+", " ", link_free_summary).strip()
+
+    def summarize(self, prompt: str, *, instructions: str) -> str:
+        """Run one timed summary request and normalize its output."""
         started_at = time_module.monotonic()
         try:
-            log(f"summary: request model={self.model}")
-            result = self.generate(prompt)
-            summary = result.response.strip()
+            log(f"summary: request model={OPENAI_SUMMARY_MODEL}")
+            summary = self.generate(prompt, instructions=instructions).strip()
             if not summary:
                 raise VideoFailure("summary unavailable: model returned an empty response")
-            log(f"summary: ok model={self.model}")
-            log(f"summary result model={self.model}:\n{summary}")
+            log(f"summary: ok model={OPENAI_SUMMARY_MODEL}")
+            log(f"summary result model={OPENAI_SUMMARY_MODEL}:\n{summary}")
             return summary
         except VideoFailure as exc:
-            log(f"summary: failed model={self.model}: {exception_log_message(exc)}")
+            log(
+                f"summary: failed model={OPENAI_SUMMARY_MODEL}: "
+                f"{exception_log_message(exc)}"
+            )
             raise VideoFailure(f"summary unavailable: {exc}") from exc
         finally:
             log(
                 "summary: duration "
-                f"model={self.model}: elapsed="
+                f"model={OPENAI_SUMMARY_MODEL}: elapsed="
                 f"{format_duration(time_module.monotonic() - started_at)}",
                 essential=True,
             )
 
     @staticmethod
     def build_summary_prompt(transcript: str, *, language_code: str = "") -> str:
+        """Attach a language hint to nonempty transcript text."""
         cleaned_transcript = transcript.strip()
         if not cleaned_transcript:
             return ""
@@ -1035,6 +1006,47 @@ class OllamaClient:
         if not normalized_language_code:
             return cleaned_transcript
         return f"Summary language code: {normalized_language_code}.\n\n{cleaned_transcript}"
+
+
+class DescriptionCleaner:
+    """Removes links and obvious channel boilerplate for a last-resort fallback."""
+
+    LINK_PATTERN = re.compile(
+        r"(?i)(?:https?://|www\.)\S+|"
+        r"\b[\w.-]+\.(?:com|org|net|io|co|tv|me|gg|ly)(?:/\S*)?"
+    )
+    UNRELATED_PATTERN = re.compile(
+        r"(?i)\b(?:subscribe|sponsor(?:ed)?|affiliate|discount|coupon|promo code|"
+        r"merch|patreon|newsletter|follow (?:me|us)|social media|contact|business inquiries)\b"
+    )
+
+    @classmethod
+    def prepare_for_model(cls, description: str) -> str:
+        """Strip links before sending description text to OpenAI."""
+        without_links = cls.LINK_PATTERN.sub("", html.unescape(description))
+        return "\n".join(line.strip() for line in without_links.splitlines() if line.strip())
+
+    @classmethod
+    def clean(cls, description: str) -> str:
+        """Return a concise link-free description if OpenAI is unavailable."""
+        prepared = cls.prepare_for_model(description)
+        relevant_lines: list[str] = []
+        for line in prepared.splitlines():
+            if cls.UNRELATED_PATTERN.search(line):
+                continue
+            if re.fullmatch(r"[\W_]*", line):
+                continue
+            relevant_lines.append(line)
+            if len(" ".join(relevant_lines)) >= 600:
+                break
+
+        cleaned = " ".join(relevant_lines)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if not cleaned:
+            return "No essential facts."
+        if len(cleaned) > 700:
+            cleaned = cleaned[:697].rsplit(" ", 1)[0].rstrip(" ,;:") + "..."
+        return cleaned
 
 class TelegramClient:
     """Formats and sends Telegram messages, including run-level notices."""
@@ -1112,157 +1124,21 @@ class TelegramClient:
             f"TextTube stopped after reaching the {DEFAULT_VIDEO_LIMIT}-video limit for this run."
         )
 
-class MlxWhisperService:
-    """Handles local mlx-whisper server lifecycle and audio transcription fallback."""
-
-    @staticmethod
-    def mlx_whisper_service_url(path: str) -> str:
-        return f"{MLX_WHISPER_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
-
-    @staticmethod
-    def mlx_whisper_unavailable_message(detail: str) -> str:
-        return (
-            "audio transcript unavailable: mlx-whisper host unavailable "
-            f"at {MLX_WHISPER_BASE_URL}: {detail}"
-        )
+class OpenAIAudioTranscriber:
+    """Downloads YouTube audio and transcribes resource-sized chunks with OpenAI."""
 
     @staticmethod
     def video_audio_cache_path(state_root: Path, video_id: str) -> Path:
         return state_root / "var" / CACHE_DIR_NAME / f"{video_id}{AUDIO_CACHE_EXTENSION}"
 
     @staticmethod
-    def require_ffmpeg() -> None:
-        if shutil.which("ffmpeg"):
-            return
-        raise FatalError("ffmpeg is required on the Mac that runs TextTube.")
-
-    @staticmethod
-    def mlx_is_ready() -> bool:
-        try:
-            with request.urlopen(MlxWhisperService.mlx_whisper_service_url("/healthz"), timeout=1) as response:
-                return response.status == 200
-        except (OSError, error.URLError):
-            return False
-
-    @staticmethod
-    def mlx_port_in_use() -> bool:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(1)
-            return sock.connect_ex((MLX_WHISPER_HOST, MLX_WHISPER_PORT)) == 0
-
-    @staticmethod
-    def stop_process(process: ManagedMlxProcess | None) -> None:
-        if process is None:
-            return
-        if process.process.poll() is None:
-            MlxWhisperService._signal_process_group(process.process, signal.SIGINT)
-            try:
-                process.process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                MlxWhisperService._signal_process_group(process.process, signal.SIGTERM)
-                try:
-                    process.process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    MlxWhisperService._signal_process_group(process.process, signal.SIGKILL)
-                    process.process.wait()
-        process.log_file.close()
-
-    @staticmethod
-    def _signal_process_group(process: subprocess.Popen[bytes], sig: int) -> None:
-        try:
-            os.killpg(process.pid, sig)
-        except ProcessLookupError:
-            return
-
-    @staticmethod
-    def start_managed_process(state_root: Path) -> ManagedMlxProcess | None:
-        if MlxWhisperService.mlx_is_ready():
-            log("mlx-whisper: reusing existing helper", essential=True)
-            return None
-        if MlxWhisperService.mlx_port_in_use():
-            raise FatalError(
-                f"Port {MLX_WHISPER_PORT} is already in use and mlx-whisper did not pass /healthz"
-            )
-
-        log_directory = state_root / "var" / "logs"
-        log_directory.mkdir(parents=True, exist_ok=True)
-        log_path = log_directory / MLX_WHISPER_LOG_FILE_NAME
-        log_file = log_path.open("ab")
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                "from texttube_app import MlxWhisperService; "
-                "raise SystemExit(MlxWhisperService.run_server())",
-            ],
-            cwd=state_root,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        managed_process = ManagedMlxProcess(process=process, log_file=log_file)
-
-        for _ in range(MLX_READY_TIMEOUT_SECONDS):
-            if managed_process.process.poll() is not None:
-                MlxWhisperService.stop_process(managed_process)
-                raise FatalError(f"mlx-whisper exited before becoming ready; check {log_path}")
-            if MlxWhisperService.mlx_is_ready():
-                log(f"mlx-whisper: ready log={log_path}", essential=True)
-                return managed_process
-            time_module.sleep(1)
-
-        MlxWhisperService.stop_process(managed_process)
-        raise FatalError(f"mlx-whisper did not become ready before timeout; check {log_path}")
-
-    @staticmethod
-    def transcribe_file(audio_path: str, mlx_whisper_model: str) -> str:
-        import mlx_whisper
-
-        MlxWhisperService.require_ffmpeg()
-        result = mlx_whisper.transcribe(
-            audio_path,
-            path_or_hf_repo=mlx_whisper_model,
-            verbose=False,
-            temperature=0.0,
-            condition_on_previous_text=False,
-        )
-        text = str(result.get("text", "")).strip()
-        if not text:
-            raise RuntimeError("mlx-whisper returned no text")
-        return text
-
-    @staticmethod
-    def run_server() -> int:
-        MlxWhisperService.require_ffmpeg()
-        mlx_whisper_model = ConfigLoader.resolve_mlx_whisper_model(
-            AppEnvironment.texttube_home() / ".secrets"
-        )
-
-        with ProcessPoolExecutor(max_workers=MLX_TRANSCRIBE_WORKERS) as executor:
-            MlxHandler.executor = executor
-            MlxHandler.mlx_whisper_model = mlx_whisper_model
-            server = ThreadingHTTPServer((MLX_WHISPER_HOST, MLX_WHISPER_PORT), MlxHandler)
-            print(
-                f"mlx-whisper listening on {MLX_WHISPER_BASE_URL} "
-                f"model={mlx_whisper_model} transcribe_workers={MLX_TRANSCRIBE_WORKERS}",
-                flush=True,
-            )
-            try:
-                server.serve_forever()
-            except KeyboardInterrupt:
-                print("mlx-whisper shutting down", flush=True)
-            finally:
-                server.server_close()
-        return 0
-
-    @staticmethod
     def fetch_audio_transcript(
+        client: Any,
         video_id: str,
-        mlx_whisper_model: str,
         *,
         audio_cache_path: Path | None = None,
     ) -> "TranscriptResult":
-        log(f"transcript audio: start {video_id} model={mlx_whisper_model}")
+        log(f"transcript audio: start {video_id} model={OPENAI_TRANSCRIPTION_MODEL}")
         started_at = time_module.perf_counter()
 
         try:
@@ -1356,8 +1232,11 @@ class MlxWhisperService:
                     ) from exc
 
                 chunk_paths = sorted(chunk_dir.glob("chunk-*.m4a")) or [audio_path]
-                text = MlxWhisperService.fetch_mlx_audio_transcript(chunk_paths, mlx_whisper_model)
-                log(f"transcript audio: ok {video_id}: mlx {len(chunk_paths)} chunks")
+                text = OpenAIAudioTranscriber.transcribe_chunks(
+                    client,
+                    chunk_paths,
+                )
+                log(f"transcript audio: ok {video_id}: openai {len(chunk_paths)} chunks")
                 log(f"transcript audio result {video_id}:\n{text}")
                 return TranscriptResult(text=text)
         finally:
@@ -1365,158 +1244,39 @@ class MlxWhisperService:
             log(f"transcript audio: duration {video_id}: {duration}", essential=True)
 
     @staticmethod
-    def fetch_mlx_audio_transcript(chunk_paths: list[Path], mlx_whisper_model: str) -> str:
-        requests_module = AppEnvironment.import_requests()
-        max_workers = max(1, min(MLX_TRANSCRIBE_WORKERS, len(chunk_paths)))
-        results = [""] * len(chunk_paths)
-        errors: list[str] = []
-        service_url = MlxWhisperService.mlx_whisper_service_url("/transcribe")
-        log(f"transcript audio: mlx model={mlx_whisper_model} workers={max_workers}")
-
-        def transcribe_chunk(index: int, chunk_path: Path) -> tuple[int, str]:
-            log(f"transcript audio: mlx chunk {chunk_path.name}")
+    def transcribe_chunks(client: Any, chunk_paths: list[Path]) -> str:
+        """Transcribe audio chunks sequentially to minimize container resource use."""
+        openai_module = AppEnvironment.import_openai()
+        results: list[str] = []
+        for chunk_path in chunk_paths:
+            log(
+                f"transcript audio: openai chunk {chunk_path.name} "
+                f"model={OPENAI_TRANSCRIPTION_MODEL}"
+            )
             try:
-                payload = chunk_path.read_bytes()
-                response = requests_module.post(
-                    service_url,
-                    data=payload,
-                    headers={
-                        "Content-Type": "application/octet-stream",
-                        "X-File-Suffix": chunk_path.suffix or ".m4a",
-                    },
-                    timeout=LOCAL_MODEL_TIMEOUT_SECONDS,
-                )
-            except requests_module.ConnectTimeout as exc:
-                raise VideoFailure(
-                    MlxWhisperService.mlx_whisper_unavailable_message(
-                        "connection attempt timed out"
+                with chunk_path.open("rb") as audio_file:
+                    response = client.with_options(
+                        timeout=OPENAI_TRANSCRIPTION_TIMEOUT_SECONDS,
+                    ).audio.transcriptions.create(
+                        model=OPENAI_TRANSCRIPTION_MODEL,
+                        file=audio_file,
+                        response_format="json",
                     )
-                ) from exc
-            except requests_module.ConnectionError as exc:
+            except openai_module.OpenAIError as exc:
                 raise VideoFailure(
-                    MlxWhisperService.mlx_whisper_unavailable_message(
-                        exception_log_message(exc)
-                    )
-                ) from exc
-            except requests_module.RequestException as exc:
-                raise VideoFailure(
-                    "audio transcript unavailable: mlx-whisper request failed: "
+                    "audio transcript unavailable: OpenAI request failed: "
                     f"{exception_log_message(exc)}"
                 ) from exc
 
-            if response.status_code != 200:
-                detail = response.text[:300].replace("\n", " ")
-                raise VideoFailure(
-                    f"audio transcript unavailable: mlx-whisper failed: "
-                    f"HTTP {response.status_code}: {detail}"
-                )
-
-            try:
-                data = response.json()
-            except json.JSONDecodeError as exc:
-                raise VideoFailure(
-                    "audio transcript unavailable: mlx-whisper returned invalid JSON"
-                ) from exc
-
-            text = str(data.get("text", "")).strip()
+            text = str(response.text or "").strip()
             if not text:
-                raise VideoFailure("audio transcript unavailable: mlx-whisper returned no text")
-            return index, text
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {
-                executor.submit(transcribe_chunk, index, chunk_path): chunk_path.name
-                for index, chunk_path in enumerate(chunk_paths)
-            }
-            for future in concurrent.futures.as_completed(future_map):
-                chunk_name = future_map[future]
-                try:
-                    index, text = future.result()
-                    results[index] = text
-                except VideoFailure as exc:
-                    errors.append(f"{chunk_name}: {exc}")
-
-        if errors:
-            raise VideoFailure("; ".join(errors))
+                raise VideoFailure("audio transcript unavailable: OpenAI returned no text")
+            results.append(text)
 
         text = "\n".join(part for part in results if part).strip()
         if not text:
-            raise VideoFailure("audio transcript unavailable: mlx-whisper returned no text")
+            raise VideoFailure("audio transcript unavailable: OpenAI returned no text")
         return text
-
-class MlxHandler(BaseHTTPRequestHandler):
-    """Serves the local HTTP interface used by chunked mlx-whisper transcription."""
-
-    executor: ProcessPoolExecutor | None = None
-    mlx_whisper_model = MLX_WHISPER_MODEL
-
-    def do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path != "/healthz":
-            self.send_json(404, {"error": "not found"})
-            return
-        self.send_json(200, {"ok": True})
-
-    def do_POST(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path != "/transcribe":
-            self.send_json(404, {"error": "not found"})
-            return
-
-        if self.executor is None:
-            self.send_json(500, {"error": "transcription executor is not configured"})
-            return
-
-        content_length = self.headers.get("Content-Length", "").strip()
-        if not content_length:
-            self.send_json(411, {"error": "missing Content-Length"})
-            return
-
-        try:
-            size = int(content_length)
-        except ValueError:
-            self.send_json(400, {"error": "invalid Content-Length"})
-            return
-        if size <= 0:
-            self.send_json(400, {"error": "empty audio payload"})
-            return
-
-        body = self.rfile.read(size)
-        suffix = self.headers.get("X-File-Suffix", ".m4a").strip() or ".m4a"
-        if not suffix.startswith("."):
-            suffix = f".{suffix.lstrip('.')}"
-
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            prefix="texttube-mlx-",
-            suffix=suffix,
-        ) as audio_file:
-            audio_file.write(body)
-            temp_path = audio_file.name
-
-        try:
-            text = self.executor.submit(
-                MlxWhisperService.transcribe_file,
-                temp_path,
-                self.mlx_whisper_model,
-            ).result()
-        except Exception as exc:
-            self.send_json(500, {"error": str(exc)})
-        else:
-            self.send_json(200, {"text": text})
-        finally:
-            Path(temp_path).unlink(missing_ok=True)
-
-    def log_message(self, format: str, *args: object) -> None:
-        print(f"[mlx-service] {self.address_string()} - {format % args}", flush=True)
-
-    def send_json(self, status: int, payload: dict[str, object]) -> None:
-        encoded = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(encoded)))
-        self.end_headers()
-        self.wfile.write(encoded)
 
 class AppEnvironment:
     """Resolves repository and runtime home paths for the active process."""
@@ -1536,9 +1296,19 @@ class AppEnvironment:
             import requests
         except ModuleNotFoundError as exc:
             raise FatalError(
-                "Missing Python dependency: requests. Install requirements.txt into the local venv."
+                "Missing Python dependency: requests. Install requirements.txt or use Docker."
             ) from exc
         return requests
+
+    @staticmethod
+    def import_openai() -> Any:
+        try:
+            import openai
+        except ModuleNotFoundError as exc:
+            raise FatalError(
+                "Missing Python dependency: openai. Install requirements.txt or use Docker."
+            ) from exc
+        return openai
 
 class ValueParser:
     """Parses CLI, timestamps, IDs, and other small normalized value types."""
@@ -1598,44 +1368,7 @@ class ValueParser:
         return [values[index : index + size] for index in range(0, len(values), size)]
 
 class ConfigLoader:
-    """Loads configuration from .secrets plus environment overrides."""
-
-    @staticmethod
-    def read_dotenv(path: Path) -> dict[str, str]:
-        values: dict[str, str] = {}
-        if not path.exists():
-            return values
-
-        for line_number, raw_line in enumerate(
-            path.read_text(encoding="utf-8").splitlines(),
-            start=1,
-        ):
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export ") :].strip()
-            if "=" not in line:
-                raise FatalError(f"{path} line {line_number} is not KEY=VALUE format")
-
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip()
-            if not key:
-                raise FatalError(f"{path} line {line_number} has an empty key")
-            if (value.startswith('"') and value.endswith('"')) or (
-                value.startswith("'") and value.endswith("'")
-            ):
-                value = value[1:-1]
-            values[key] = value
-
-        return values
-
-    @staticmethod
-    def merged_environment(secrets_path: Path) -> dict[str, str]:
-        values = ConfigLoader.read_dotenv(secrets_path)
-        values.update(os.environ)
-        return values
+    """Loads process configuration and the volume-backed Google refresh token."""
 
     @staticmethod
     def parse_optional_bool(
@@ -1661,8 +1394,8 @@ class ConfigLoader:
             raise FatalError(f"Invalid integer configuration for {key}: {raw_value}") from exc
 
     @staticmethod
-    def apply_runtime_defaults(args: argparse.Namespace, secrets_path: Path) -> None:
-        values = ConfigLoader.merged_environment(secrets_path)
+    def apply_runtime_defaults(args: argparse.Namespace) -> None:
+        values = dict(os.environ)
 
         configured_limit = ConfigLoader.parse_optional_int(values, "TEXTTUBE_LIMIT")
         if args.limit is None:
@@ -1681,30 +1414,39 @@ class ConfigLoader:
         return value
 
     @staticmethod
-    def load_config(secrets_path: Path, *, allow_manual_access_token: bool = False) -> Config:
-        values = ConfigLoader.merged_environment(secrets_path)
-        values.pop("YOUTUBE_ACCESS_TOKEN", None)
-        youtube_access_token = ""
-        if allow_manual_access_token:
-            youtube_access_token = os.environ.get("YOUTUBE_ACCESS_TOKEN", "").strip()
-
-        if youtube_access_token:
-            google_client_id = ""
-            google_client_secret = ""
-            google_refresh_token = ""
-        else:
-            google_client_id = ConfigLoader.require_env(values, "GOOGLE_OAUTH_CLIENT_ID")
-            google_client_secret = ConfigLoader.require_env(values, "GOOGLE_OAUTH_CLIENT_SECRET")
-            google_refresh_token = ConfigLoader.require_env(values, "GOOGLE_OAUTH_REFRESH_TOKEN")
-
+    def load_config(google_refresh_token_path: Path) -> Config:
+        values = dict(os.environ)
         return Config(
+            openai_api_key=ConfigLoader.require_env(values, "OPENAI_API_KEY"),
             telegram_bot_token=ConfigLoader.require_env(values, "TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=ConfigLoader.require_env(values, "TELEGRAM_CHAT_ID"),
-            google_client_id=google_client_id,
-            google_client_secret=google_client_secret,
-            google_refresh_token=google_refresh_token,
-            youtube_access_token=youtube_access_token,
+            google_client_id=ConfigLoader.require_env(values, "GOOGLE_OAUTH_CLIENT_ID"),
+            google_client_secret=ConfigLoader.require_env(
+                values,
+                "GOOGLE_OAUTH_CLIENT_SECRET",
+            ),
+            google_refresh_token=ConfigLoader.read_google_refresh_token(
+                google_refresh_token_path
+            ),
         )
+
+    @staticmethod
+    def read_google_refresh_token(path: Path) -> str:
+        if not path.exists():
+            raise FatalError(
+                "Google OAuth authorization is missing. Run "
+                f"`{GOOGLE_OAUTH_AUTH_COMMAND}`."
+            )
+        try:
+            refresh_token = path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise FatalError(f"Cannot read Google OAuth authorization: {exc}") from exc
+        if not refresh_token:
+            raise FatalError(
+                "Google OAuth authorization is empty. Run "
+                f"`{GOOGLE_OAUTH_AUTH_COMMAND}`."
+            )
+        return refresh_token
 
     @staticmethod
     def parse_transcript_language_preferences(raw_value: str) -> tuple[str, ...]:
@@ -1723,30 +1465,11 @@ class ConfigLoader:
         return tuple(preferences)
 
     @staticmethod
-    def resolve_transcript_language_preferences(secrets_path: Path) -> tuple[str, ...]:
-        configured = ConfigLoader.merged_environment(secrets_path).get(
-            "TRANSCRIPT_LANGUAGES",
-            "",
-        ).strip()
+    def resolve_transcript_language_preferences() -> tuple[str, ...]:
+        configured = os.environ.get("TRANSCRIPT_LANGUAGES", "").strip()
         if configured:
             return ConfigLoader.parse_transcript_language_preferences(configured)
         return ()
-
-    @staticmethod
-    def resolve_ollama_model(secrets_path: Path) -> str:
-        configured = ConfigLoader.merged_environment(secrets_path).get(
-            "OLLAMA_MODEL",
-            "",
-        ).strip()
-        return configured or OLLAMA_MODEL
-
-    @staticmethod
-    def resolve_mlx_whisper_model(secrets_path: Path) -> str:
-        configured = ConfigLoader.merged_environment(secrets_path).get(
-            "MLX_WHISPER_MODEL",
-            "",
-        ).strip()
-        return configured or MLX_WHISPER_MODEL
 
 class SubscriptionState:
     """Tracks the persisted subscription window cutoff between runs."""
@@ -1762,14 +1485,10 @@ class SubscriptionState:
         )
 
     @staticmethod
-    def subscription_window(
-        state_root: Path,
-        *,
-        ignore_saved_window: bool = False,
-    ) -> tuple[datetime, datetime]:
+    def subscription_window(state_root: Path) -> tuple[datetime, datetime]:
         window_end = datetime.now(timezone.utc).replace(microsecond=0)
         state_path = SubscriptionState.last_subscription_window_end_path(state_root)
-        if ignore_saved_window or not state_path.exists():
+        if not state_path.exists():
             window_start = None
         else:
             value = state_path.read_text(encoding="utf-8").strip()
@@ -1797,7 +1516,6 @@ class RuntimePaths:
 
     code_root: Path
     state_root: Path
-    secrets_path: Path
 
     @classmethod
     def discover(cls) -> "RuntimePaths":
@@ -1806,14 +1524,10 @@ class RuntimePaths:
         return cls(
             code_root=code_root,
             state_root=state_root,
-            secrets_path=state_root / ".secrets",
         )
 
     def prompt_path(self) -> Path:
-        configured = ConfigLoader.merged_environment(self.secrets_path).get(
-            "SUMMARIZER_MD",
-            "",
-        ).strip()
+        configured = os.environ.get("SUMMARIZER_MD", "").strip()
         if not configured:
             return self.code_root / "SUMMARIZER.md"
 
@@ -1831,15 +1545,23 @@ class RuntimePaths:
     def audio_cache_path(self, video_id: str, *, enabled: bool) -> Path | None:
         if not enabled:
             return None
-        return MlxWhisperService.video_audio_cache_path(self.state_root, video_id)
+        return OpenAIAudioTranscriber.video_audio_cache_path(self.state_root, video_id)
 
     def transcript_cache_path(self, video_id: str, *, enabled: bool) -> Path | None:
         if not enabled:
             return None
         return self.state_root / "var" / CACHE_DIR_NAME / f"{video_id}{TRANSCRIPT_CACHE_EXTENSION}"
 
+    def google_refresh_token_path(self) -> Path:
+        return (
+            self.state_root
+            / "var"
+            / SUBSCRIPTION_STATE_DIR_NAME
+            / GOOGLE_OAUTH_REFRESH_TOKEN_FILE
+        )
+
 class HttpJsonClient:
-    """Wraps JSON HTTP requests and enforces consistent fatal error handling."""
+    """Wraps one-attempt JSON HTTP requests with consistent fatal errors."""
 
     @staticmethod
     def request_json(
@@ -1905,28 +1627,6 @@ class ApplicationLifecycle:
         log(f"interrupt: received {signal_name}", essential=True)
         raise KeyboardInterrupt
 
-@dataclass
-class ManagedMlxProcess:
-    """Owns the spawned mlx-whisper helper process and its log file handle."""
-
-    process: subprocess.Popen[bytes]
-    log_file: Any
-
-@dataclass
-class LazyMlxWhisperManager:
-    """Starts the local mlx-whisper helper only when audio fallback is needed."""
-
-    state_root: Path
-    _process: ManagedMlxProcess | None = field(default=None, init=False)
-
-    def ensure_started(self) -> None:
-        if self._process is None:
-            self._process = MlxWhisperService.start_managed_process(self.state_root)
-
-    def stop(self) -> None:
-        MlxWhisperService.stop_process(self._process)
-        self._process = None
-
 class FatalError(Exception):
     """Fatal setup or API failure that should stop the whole run."""
 
@@ -1943,12 +1643,12 @@ class TelegramFailure(Exception):
 class Config:
     """Runtime secrets and API credentials for one TextTube invocation."""
 
+    openai_api_key: str
     telegram_bot_token: str
     telegram_chat_id: str
     google_client_id: str
     google_client_secret: str
     google_refresh_token: str
-    youtube_access_token: str
 
 @dataclass(frozen=True)
 class Video:
@@ -1962,12 +1662,6 @@ class Video:
     duration_seconds: int | None = None
     description: str = ""
     tags: tuple[str, ...] = ()
-
-@dataclass(frozen=True)
-class OllamaGenerateResult:
-    """Minimal Ollama generate response payload used by summarization."""
-
-    response: str
 
 @dataclass(frozen=True)
 class TranscriptResult:

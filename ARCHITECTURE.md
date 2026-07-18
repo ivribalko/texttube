@@ -1,86 +1,148 @@
 # Architecture
 
-TextTube is a small local Python app that summarizes recent YouTube subscription videos and sends one Telegram message per processed video.
+TextTube is a Docker-first Python application that summarizes recent YouTube subscription uploads and sends one Telegram message per processed video.
 
-This file is the canonical design reference for repository layout, component responsibilities, runtime state, and cross-component behavior. `README.md` stays focused on operating the app, and `SUMMARIZER.md` stays focused on model instructions and summary format.
+This document is the canonical source for structure, data flow, processing rules, state, and failure behavior. [README.md](README.md) is the operator guide. [SUMMARIZER.md](SUMMARIZER.md) is the transcript-summary system prompt.
+
+## Design Constraints
+
+- All language and audio inference runs through OpenAI.
+- The application remains a small Python program without an application framework.
+- Python installation, dependency management, execution, and validation stay inside Docker; the host runs only Docker and Compose commands.
+- Docker Compose is the packaged runtime and pulls the public GitHub Container Registry image.
+- GitHub Actions publishes multi-platform images for 64-bit Intel/AMD and ARM Linux hosts.
+- Compose receives API credentials through process environment variables and stores the Google refresh token only in its managed volume.
+- The official YouTube captions API is not used for caption downloads.
+- Model roles and cost choices are fixed application constants.
+- Scheduled runs are singletons.
 
 ## Repository Layout
 
-- `texttube_app.py` is the single Python entrypoint. It owns configuration loading, YouTube API access, transcript fetching, audio-transcription fallback, Ollama calls, Telegram delivery, application command-line behavior, process signal handling, and subscription run state.
-- `texttube` is the checkout launcher. It owns the checkout user-facing CLI, local `.venv` setup, Ollama readiness checks, checkout initialization, checkout OAuth refresh-token renewal, and local app runs. It never installs, configures, starts, or stops Homebrew packages or services.
-- `texttube_init.py` is the interactive setup helper. It owns local secret collection, optional Homebrew service cron collection for installed runs, dotenv writing, and orchestration of the OAuth helper.
-- `texttube_auth.py` is the OAuth helper. It owns Google consent URL generation, the local OAuth callback listener, token exchange, and refresh-token replacement in the selected `.secrets` file.
-- `ivribalko/homebrew-texttube` is the separate public Homebrew tap repository. Its formula packages scheduled Homebrew installs, stages runtime files into `libexec`, installs a private virtualenv under Homebrew state, and defines the cron-style Homebrew service.
-- `SUMMARIZER.md` is the single source of truth for summarization instructions and summary output rules.
-- `README.md` is the operator guide for setup, secrets, manual runs, and service installation.
-- `AGENTS.md` captures repository-specific working rules for Codex contributors.
-- `.secrets` stores local runtime secrets and must never be committed.
-- `requirements.txt` pins the Python dependencies used by both checkout runs and the packaged Homebrew install.
-- `var/` holds mutable runtime artifacts for checkout runs such as logs, cached transcripts, cached audio files, and saved subscription cutoff state.
-- `.venv/` is the shared repository-local Python environment used for checkout runs.
-- `__pycache__/` is interpreter-generated cache output and has no design role.
+- `texttube_app.py` owns application configuration, YouTube access, captions, OpenAI calls, Telegram delivery, CLI behavior, lifecycle handling, and subscription state.
+- `texttube_auth.py` runs one containerized Google device authorization session and securely stores its refresh token.
+- `texttube_scheduler.py` parses cron expressions, waits for scheduled occurrences, locks runs, launches the application, and forwards shutdown signals.
+- `SUMMARIZER.md` defines transcript-summary input and output behavior.
+- `Dockerfile` builds the shared Linux image with `texttube_app.py` as its direct entrypoint.
+- `.github/workflows/publish-container.yaml` builds and publishes the image after pushes to `main`.
+- `compose.yaml` defines the one-shot `auth` service, manual `app` service, persistent Python `scheduler` service, environment mapping, and named data volume.
+- `compose.local.yaml` overrides the one-shot `auth` and manual `app` services with a build from the current repository source.
+- `requirements.txt` pins the Python dependencies.
+- `README.md` documents setup, deployment, commands, and validation.
+- `AGENTS.md` contains repository working conventions.
 
 ## Runtime Layout
 
-- Checkout runs use the repository root as `TEXTTUBE_HOME` when that variable is unset.
-- Checkout runs keep mutable runtime data under `var/` in the repository checkout.
-- Installed Homebrew runs set `TEXTTUBE_HOME` to `$(brew --prefix)/var/texttube`.
-- Installed Homebrew runs keep their mutable runtime data under `$(brew --prefix)/var/texttube/var`.
-- Installed Homebrew runs store service schedule configuration in `$(brew --prefix)/var/texttube/service.cron`.
-- The persisted subscription window cutoff lives at `var/state/last_subscription_window_end_utc.txt` under the active runtime home.
-- Optional single-video transcript reuse lives at `var/cache/<video_id>.txt` under the active runtime home.
-- Optional single-video audio reuse lives at `var/cache/<video_id>.m4a` under the active runtime home.
-- The lazily spawned `mlx-whisper` helper writes its log to `var/logs/mlx-whisper-run.log` under the active runtime home.
+The workflow publishes `ghcr.io/ivribalko/texttube:latest` as a multi-platform image for `linux/amd64` and `linux/arm64`. It also publishes an immutable `sha-<commit>` tag for each source revision. Compose always pulls `latest`, stores immutable application files under `/app`, sets `TEXTTUBE_HOME=/data`, and mounts the managed `texttube-data` volume at `/data/var`:
 
-## Component Responsibilities
+- `/data/var/state/last_subscription_window_end_utc.txt` stores the last completed subscription cutoff.
+- `/data/var/state/google_oauth_refresh_token` stores the Google refresh token with mode `0600`.
+- `/data/var/cache/<video_id>.txt` stores an optional transcript cache entry.
+- `/data/var/cache/<video_id>.m4a` stores an optional audio cache entry.
+- `/data/var/texttube.lock` serializes scheduled runs.
 
-- `TextTubeCli` parses `--limit`, `--video`, `--cache`, `--verbose`, and `--reset-cutoff`, then applies runtime defaults for supported options from environment variables and `.secrets` before launching one application run through `TextTubeApp`.
-- `TextTubeApp` wires together runtime paths, config, HTTP session lifecycle, prompt loading, YouTube access, summarization, Telegram delivery, run-level failure notification, and the single-video versus subscription control flow.
-- `TranscriptSummarizer` applies the per-video decision flow: skip probable Shorts, reuse transcript and audio cache entries when enabled, prefer native captions, fall back to local audio transcription, summarize, and deliver the message.
-- `YouTubeClient` resolves the bearer token, reads subscriptions and uploads playlists, batches video metadata enrichment, and enforces the subscription time window.
-- `TranscriptFetcher` uses `youtube-transcript-api` for native caption discovery, orders transcript candidates by the configured language preferences, and converts unexpected transcript fetch errors into per-video failures.
-- `MlxWhisperService`, `MlxHandler`, and `LazyMlxWhisperManager` implement the local `mlx-whisper` HTTP helper, its lazy lifecycle, and chunked audio transcription fallback.
-- `OllamaClient` warms the configured local model, installs the model on first use when Ollama reports it missing, and generates transcript summaries.
-- `TelegramClient` formats outbound messages and sends them through the Telegram Bot API with previews disabled.
-- `ConfigLoader`, `RuntimePaths`, `SubscriptionState`, `ValueParser`, `HttpJsonClient`, and `ApplicationLifecycle` provide the shared support layer for configuration, paths, state, parsing, HTTP error handling, and cleanup.
+Manual runs create or reuse cache entries only when `--cache` is present. Temporary uncached audio and chunks are deleted after each video. The scheduler subprocess inherits the scheduler container’s stdout and stderr, so scheduler messages and scheduled application output share one service log. Manual application and authorization containers use attached stdout and stderr; the documented `--rm` workflow removes those containers and their retained logs when they exit. The container runtime manages all retained output through its configured logging driver, and the data volume contains no log copy.
 
-## Component Interactions
+The local Compose override builds authorization and manual application services as `texttube:local` while leaving scheduled deployment on the published image.
 
-- `./texttube` sets up the repository-local `.venv`, verifies Ollama is already reachable, and launches `texttube_app.py` with `TEXTTUBE_MANUAL_RUN=1` for checkout runs.
-- `./texttube init` calls `texttube_init.py` to create or update checkout `.secrets` interactively, including browser OAuth, without touching Homebrew state.
-- `./texttube auth` calls `texttube_auth.py` to renew `GOOGLE_OAUTH_REFRESH_TOKEN` in checkout `.secrets` by opening Google OAuth consent, listening for the local `127.0.0.1:8080` callback, and exchanging the callback code without printing tokens.
-- `texttube init` from the Homebrew install calls `texttube_init.py` to create or update `$(brew --prefix)/var/texttube/.secrets`, write the cron schedule to `$(brew --prefix)/var/texttube/service.cron`, run browser OAuth, and restart the Homebrew-managed TextTube service.
-- `TextTubeApp` loads `.secrets` from the active runtime home, overlays environment variables, lets command-line flags override overlapping runtime defaults, resolves the prompt file, and creates one shared `requests.Session`.
-- Checkout manual runs allow `YOUTUBE_ACCESS_TOKEN` only from the launching shell environment as a direct YouTube bearer token override. `.secrets` and scheduled service runs ignore that override and continue using the stored Google OAuth refresh token flow.
-- A single-video run fetches one video’s metadata and skips the subscription traversal path.
-- A subscription run computes the active window from the saved cutoff, defaulting the first run to the previous 24 hours, and advances the cutoff only after the run finishes.
-- For each candidate video, TextTube enriches metadata, skips probable Shorts based on duration, obtains transcript text, generates the summary, and sends Telegram output before continuing to the next video.
-- Unexpected per-video processing errors are downgraded to a generic fallback Telegram message so one bad video does not abort the rest of the subscription run.
-- Fatal run-level failures after `TextTubeApp` is initialized send a Telegram notification. Google OAuth `invalid_grant` failures send an actionable reauthorization notice with the correct installed or checkout auth command, while other fatal failures remain generic.
-- When native captions are unavailable, TextTube starts the local `mlx-whisper` helper only when needed, waits for `/healthz`, transcribes chunked audio through the fixed local HTTP endpoint, and stops the helper during application cleanup.
-- Console `SIGINT` and `SIGTERM` converge on the shared application cleanup path, which closes the shared HTTP session, stops the managed `mlx-whisper` helper process group, and exits with code `130` for interrupts.
-- Error logs hide exception details by default and include full raw exception text only when verbose logging is enabled.
+## Configuration and Authentication
 
-## Processing Rules
+Compose maps its environment directly into its services. `ConfigLoader` reads process environment values, applies supported command-line overrides, and loads the Google refresh token from the managed volume. `TextTubeScheduler` reads and validates `CRON` independently. Required stack credentials are:
 
-- `SUMMARIZER.md` is loaded as the default system prompt for every Ollama call, optionally overridden by `SUMMARIZER_MD`.
-- Preferred native caption selection comes from `TRANSCRIPT_LANGUAGES`, ordered as configured, with the original spoken-audio language promoted ahead of the rest of that order when YouTube exposes an auto-generated transcript in a configured language.
-- When TextTube knows the selected native transcript language code, it prepends `Summary language code: <code>.` to the transcript prompt so the summary stays in that language more reliably.
-- TextTube does not use the official YouTube captions API for caption downloads. It relies on `youtube-transcript-api` for native transcript retrieval and local audio transcription fallback when needed.
-- Subscription processing deduplicates videos across channels and playlists and treats videos up to three minutes long as probable Shorts.
-- Subscription processing deduplicates by YouTube video ID only, so creator reuploads can still produce duplicate Telegram messages when YouTube assigns a new video ID and publish timestamp to the same content.
-- If transcript fetching, transcript fallback, or summary generation fails for a video, TextTube sends a generic Telegram failure message for that video.
-- If Google OAuth reports `invalid_grant`, TextTube tells the operator that authorization expired or was revoked, provides the appropriate auth command, and notes that the subscription window remains preserved. Other authentication, subscription traversal, and run-level failures send a generic Telegram failure message. Notification failures are logged and do not replace the original failure.
-- If a subscription run stops because it reached the default `--limit` of `100`, TextTube sends one final Telegram message noting that the run ended at that cap.
+- `OPENAI_API_KEY`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `GOOGLE_OAUTH_CLIENT_ID`
+- `GOOGLE_OAUTH_CLIENT_SECRET`
+
+`TRANSCRIPT_LANGUAGES` is optional and controls native-caption preference order. `TEXTTUBE_LIMIT` and `TEXTTUBE_VERBOSE` provide CLI defaults. `SUMMARIZER_MD` selects the transcript prompt.
+
+The Google credentials must use application type `TVs and Limited Input devices`. The profiled `auth` service requests the YouTube read-only scope, shows Google’s verification URL and user code, polls at Google’s requested interval, and atomically writes the returned refresh token to the named volume with owner-only permissions. It never prints the refresh token and requires no callback port or browser inside the container.
+
+## Application Components
+
+- `TextTubeCli` parses arguments, applies defaults, creates the lifecycle owner, and converts fatal failures into process exit codes.
+- `texttube_auth.py` performs the device authorization protocol and owns atomic refresh-token storage.
+- `TextTubeScheduler` validates a five-field expression with `croniter`, waits until each UTC occurrence, acquires the shared lock, and runs TextTube as a subprocess.
+- `TextTubeApp` wires runtime paths, a shared general-purpose HTTP session, the official OpenAI client, configuration, prompt loading, API clients, and the selected run mode.
+- `YouTubeClient` refreshes Google authorization, traverses subscriptions and upload playlists, enriches video metadata, deduplicates IDs, and enforces the subscription window.
+- `TranscriptFetcher` discovers and retrieves native captions through `youtube-transcript-api`, ordered by configured language preference.
+- `TranscriptSummarizer` selects transcript sources, enforces duration boundaries, requests summaries, applies description fallback, and sends Telegram messages.
+- `OpenAIAudioTranscriber` downloads eligible fallback audio with `yt-dlp`, creates five-minute chunks with `ffmpeg`, and transcribes chunks sequentially with `gpt-transcribe`.
+- `OpenAIClient` uses the official OpenAI Python SDK and Responses API with `gpt-5.6-luna` for transcript and description summaries. Responses summary requests use `store: false`.
+- `DescriptionCleaner` strips links and obvious promotional boilerplate before the description request and provides deterministic cleanup if that request fails.
+- `TelegramClient` formats HTML-safe messages, truncates them to Telegram limits, disables link previews, and sends run notices.
+- `SubscriptionState`, `RuntimePaths`, `ValueParser`, `HttpJsonClient`, and `ApplicationLifecycle` provide state, path, parsing, HTTP, signal, and cleanup support.
+
+## Per-Video Flow
+
+- Videos with a known duration of three minutes or less are treated as probable Shorts and skipped.
+- A cached transcript is used first when manual cache reuse is enabled.
+- Native captions are attempted next.
+- If native captions fail and the video is no longer than 60 minutes, audio is downloaded, chunked, and transcribed.
+- If native captions fail and the video is longer than 60 minutes, no audio download or transcription is attempted.
+- The resolved transcript is summarized with the transcript prompt.
+- Any transcript retrieval, audio transcription, or transcript-summary failure switches to a title-guided OpenAI summary of the cleaned video description.
+- If the description request also fails, deterministic link-free description cleanup supplies the message body.
+- The final body is sent as one Telegram message with channel, title, and YouTube link.
+
+Exactly 60 minutes remains eligible for audio transcription. The exclusion begins above 60 minutes.
+
+## Summary Rules
+
+`SUMMARIZER.md` applies only to transcript summaries. When the selected native caption language is known, TextTube prepends `Summary language code: <code>.` to the transcript input.
+
+Description fallback has a separate code-owned prompt because its source and cleanup requirements differ:
+
+- The video title establishes relevance but is not an independent factual source.
+- The description supplies the factual content.
+- Links, domains, social handles, promotions, affiliate text, calls to action, contacts, and channel boilerplate are removed.
+- Output remains a compact plain-text paragraph.
+
+The summary model is `gpt-5.6-luna`. The audio transcription model is `gpt-transcribe`. Neither is configurable at runtime.
+
+## Subscription State and Scheduling
+
+A subscription run records its start time as the prospective window end. The previous completed cutoff is the window start; when no cutoff exists, the start defaults to 24 hours earlier.
+
+The cutoff is written only after subscription traversal completes. Fatal authentication, subscription, or run-level failures preserve the previous cutoff. Per-video fallbacks and failures do not abort traversal. A manual reset is performed outside the application by deleting the cutoff file while holding the scheduler lock.
+
+The default message limit is 100. Probable Shorts do not count toward it. Successfully delivered transcript or description-fallback messages do count. When the default cap stops a run, TextTube sends a final limit notice.
+
+The scheduler:
+
+- requires one standard five-field expression from `CRON`
+- rejects cron shortcuts and invalid expressions before waiting
+- evaluates occurrences in UTC and recalculates after every completed or skipped run
+- inherits the Compose environment and launches each run as an isolated subprocess
+- invokes the application under a non-blocking `fcntl` file lock
+- forwards application output directly to the scheduler container’s standard streams
+- forwards `SIGINT` and `SIGTERM` to an active application subprocess
+
+The authorization service:
+
+- runs only through the `auth` profile
+- shares the application’s managed data volume
+- performs one interactive device authorization session and exits
+- can safely replace an expired or revoked refresh token
+
+## Failure Behavior
+
+- Every individual HTTP request is attempted once. The OpenAI client is configured with `max_retries=0`; device authorization performs protocol-required status polling rather than transport retries.
+- Expected per-video failures switch to description fallback or allow later videos to continue.
+- Fatal failures after Telegram initialization trigger a run-level Telegram notice.
+- Google OAuth `invalid_grant` produces a reauthorization-specific notice and preserves the subscription window.
+- Error details are hidden unless verbose logging is enabled.
+- `SIGINT` and `SIGTERM` close the shared HTTP session and return exit code `130`.
+- Invalid scheduler configuration exits with code `2`; scheduler shutdown signals interrupt waiting and propagate to an active application run.
 
 ## External Dependencies
 
-- Python standard library modules handle CLI parsing, configuration loading, filesystem work, subprocess orchestration, local HTTP serving, and concurrency.
-- `requests` handles Google OAuth, the YouTube Data API, Ollama, and Telegram Bot API calls.
-- `youtube-transcript-api` handles native caption discovery.
-- `yt-dlp` handles local audio download for fallback transcription.
-- `mlx-whisper` handles Apple Silicon audio transcription through the local helper server.
-- `ffmpeg` is required on the host Mac for audio decoding and chunking.
-- Homebrew services manage the installed TextTube cron schedule and the local Ollama service used for summarization.
-
-Keep the architecture simple. Add files only when `texttube_app.py` becomes genuinely hard to reason about, and keep external service behavior explicit at the call sites.
+- Python standard library modules handle CLI parsing, configuration, files, subprocesses, signals, and state.
+- `requests` handles Google device authorization, token refresh, YouTube Data API calls, and Telegram delivery.
+- `openai` is the official client for Responses API summaries and audio transcription.
+- `croniter` validates cron expressions and calculates their next UTC occurrence.
+- `youtube-transcript-api` retrieves native captions.
+- `yt-dlp`, its matching EJS challenge solver, and Deno download eligible fallback audio from YouTube.
+- `ffmpeg` extracts and chunks audio inside the container.
+- Python `fcntl` locking and the util-linux `flock` command coordinate scheduled runs and lock-safe maintenance.
+- GitHub Actions and GitHub Container Registry build and distribute the public runtime image.
