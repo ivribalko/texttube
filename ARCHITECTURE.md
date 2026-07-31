@@ -63,10 +63,11 @@ The Google credentials must use application type `TVs and Limited Input devices`
 - `TextTubeCli` parses arguments, applies defaults, creates the lifecycle owner, and converts fatal failures into process exit codes.
 - `AuthorizationService` validates the stored token every hour, controls container health readiness, performs replacement device authorization, and owns atomic refresh-token storage.
 - `TextTubeScheduler` validates a five-field expression with `croniter`, waits until each UTC occurrence, acquires the shared lock, and runs TextTube as a subprocess.
-- `TextTubeApp` wires runtime paths, a shared general-purpose HTTP session, the official OpenAI client, configuration, prompt loading, API clients, and the selected run mode.
+- `TextTubeApp` is the composition root: it wires runtime paths, shared external clients, focused services, and the selected run mode.
 - `YouTubeClient` refreshes Google authorization, traverses subscriptions and upload playlists, enriches video metadata, deduplicates IDs, and enforces the subscription window.
+- `VideoProcessor` owns the per-video use case: skip policy, summary fallback selection, message formatting, and delivery.
+- `TranscriptService` owns transcript source selection and cache I/O, using native captions first and eligible audio transcription second.
 - `TranscriptFetcher` discovers and retrieves native captions through `youtube-transcript-api`, ordered by configured language preference.
-- `TranscriptSummarizer` selects transcript sources, enforces duration boundaries, requests summaries, applies description fallback, and sends Telegram messages.
 - `OpenAIAudioTranscriber` downloads eligible fallback audio with `yt-dlp`, creates five-minute chunks with `ffmpeg`, and transcribes chunks sequentially with `gpt-transcribe`.
 - `OpenAIClient` uses the official OpenAI Python SDK and Responses API with `gpt-5.6-luna` for transcript and description summaries. Responses summary requests use `store: false`.
 - `DescriptionCleaner` strips links and obvious promotional boilerplate before the description request and provides deterministic cleanup if that request fails.

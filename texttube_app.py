@@ -179,15 +179,19 @@ class TextTubeApp:
             max_retries=0,
         )
         self.lifecycle.add_cleanup(openai_sdk.close)
-        self.openai = OpenAIClient(
+        summaries = OpenAIClient(
             openai_sdk,
             self.system_prompt,
         )
         self.telegram = TelegramClient(self.session, self.config)
-        self.transcript_summarizer = TranscriptSummarizer(
-            self.openai,
-            self.telegram,
+        transcripts = TranscriptService(
+            openai_sdk,
             self.transcript_language_preferences,
+        )
+        self.video_processor = VideoProcessor(
+            transcripts,
+            summaries,
+            self.telegram,
         )
 
     def run(self) -> int:
@@ -222,18 +226,8 @@ class TextTubeApp:
         log(f"single video mode: {video_id}", essential=True)
         log("startup: resolve youtube token", essential=True)
         video = self.youtube.fetch_video(video_id)
-        audio_cache_path = self.paths.audio_cache_path(video_id, enabled=self.args.cache)
-        transcript_cache_path = self.paths.transcript_cache_path(video_id, enabled=self.args.cache)
         try:
-            sent_count = (
-                1
-                if self.transcript_summarizer.process_video(
-                    video,
-                    audio_cache_path=audio_cache_path,
-                    transcript_cache_path=transcript_cache_path,
-                )
-                else 0
-            )
+            sent_count = int(self.process_video(video))
         except (VideoFailure, TelegramFailure) as exc:
             log(f"failed to send {video.video_id}: {exc}", essential=True)
             sent_count = 0
@@ -257,16 +251,7 @@ class TextTubeApp:
                 stopped_by_limit = True
                 break
             try:
-                audio_cache_path = self.paths.audio_cache_path(video.video_id, enabled=self.args.cache)
-                transcript_cache_path = self.paths.transcript_cache_path(
-                    video.video_id,
-                    enabled=self.args.cache,
-                )
-                if self.transcript_summarizer.process_video(
-                    video,
-                    audio_cache_path=audio_cache_path,
-                    transcript_cache_path=transcript_cache_path,
-                ):
+                if self.process_video(video):
                     sent_count += 1
                     if self.args.limit > 0 and sent_count >= self.args.limit:
                         stopped_by_limit = True
@@ -285,41 +270,43 @@ class TextTubeApp:
             sent_count=sent_count,
             stopped_by_limit=stopped_by_limit,
         )
-        state_dir = SubscriptionState.subscription_state_dir(self.paths.state_root)
-        state_dir.mkdir(parents=True, exist_ok=True)
-        SubscriptionState.last_subscription_window_end_path(self.paths.state_root).write_text(
-            window_end.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
-            encoding="utf-8",
-        )
+        SubscriptionState.complete_window(self.paths.state_root, window_end)
         log(f"sent messages: {sent_count}", essential=True)
         return 0
 
-class TranscriptSummarizer:
-    """Coordinates transcript retrieval, fallback audio transcription, summary creation, and delivery."""
+    def process_video(self, video: "Video") -> bool:
+        """Process one video using cache paths selected by the invocation mode."""
+        return self.video_processor.process(
+            video,
+            audio_cache_path=self.paths.audio_cache_path(
+                video.video_id,
+                enabled=self.args.cache,
+            ),
+            transcript_cache_path=self.paths.transcript_cache_path(
+                video.video_id,
+                enabled=self.args.cache,
+            ),
+        )
+
+
+class VideoProcessor:
+    """Runs the per-video summary use case and delivers its Telegram message."""
 
     def __init__(
         self,
-        openai: "OpenAIClient",
-        telegram: TelegramClient,
-        transcript_language_preferences: tuple[str, ...],
+        transcripts: "TranscriptService",
+        summaries: "OpenAIClient",
+        telegram: "TelegramClient",
     ):
-        self.openai = openai
+        self.transcripts = transcripts
+        self.summaries = summaries
         self.telegram = telegram
-        self.transcript_language_preferences = transcript_language_preferences
 
     @staticmethod
     def is_probable_short(video: Video) -> bool:
         return video.duration_seconds is not None and video.duration_seconds <= 180
 
-    @staticmethod
-    def exceeds_audio_transcription_limit(video: Video) -> bool:
-        """Return whether audio fallback is forbidden by the duration limit."""
-        return (
-            video.duration_seconds is not None
-            and video.duration_seconds > MAX_AUDIO_TRANSCRIPTION_DURATION_SECONDS
-        )
-
-    def process_video(
+    def process(
         self,
         video: Video,
         *,
@@ -331,17 +318,41 @@ class TranscriptSummarizer:
             return False
 
         log(f"process {video.video_id}: {video.channel_title}: {video.title}", essential=True)
-        summary = ""
+        summary, used_description = self.summarize(
+            video,
+            audio_cache_path=audio_cache_path,
+            transcript_cache_path=transcript_cache_path,
+        )
+
+        log(f"process {video.video_id}: format message")
+        message = TelegramClient.format_message(video, summary)
+        log(f"process {video.video_id}: send telegram", essential=True)
+        self.telegram.send_message(message)
+        result_label = "description fallback" if used_description else "summarized"
+        log(f"sent {video.video_id}: {result_label}")
+        return True
+
+    def summarize(
+        self,
+        video: "Video",
+        *,
+        audio_cache_path: Path | None,
+        transcript_cache_path: Path | None,
+    ) -> tuple[str, bool]:
+        """Create a transcript summary or the documented description fallback."""
         try:
-            transcript_result = self.fetch_transcript(
+            transcript_result = self.transcripts.fetch(
                 video,
                 audio_cache_path=audio_cache_path,
                 transcript_cache_path=transcript_cache_path,
             )
             log(f"process {video.video_id}: summarize", essential=True)
-            summary = self.openai.summarize_transcript(
-                transcript_result.text,
-                language_code=transcript_result.language_code,
+            return (
+                self.summaries.summarize_transcript(
+                    transcript_result.text,
+                    language_code=transcript_result.language_code,
+                ),
+                False,
             )
         except VideoFailure as exc:
             log(
@@ -356,29 +367,38 @@ class TranscriptSummarizer:
                 essential=True,
             )
 
-        used_description = False
-        if not summary:
-            used_description = True
-            log(f"process {video.video_id}: summarize description fallback", essential=True)
-            try:
-                summary = self.openai.summarize_description(video.title, video.description)
-            except VideoFailure as exc:
-                log(
-                    f"process {video.video_id}: description summary unavailable: "
-                    f"{exception_log_message(exc)}",
-                    essential=True,
-                )
-                summary = DescriptionCleaner.clean(video.description)
+        log(f"process {video.video_id}: summarize description fallback", essential=True)
+        try:
+            return self.summaries.summarize_description(video.title, video.description), True
+        except VideoFailure as exc:
+            log(
+                f"process {video.video_id}: description summary unavailable: "
+                f"{exception_log_message(exc)}",
+                essential=True,
+            )
+            return DescriptionCleaner.clean(video.description), True
 
-        log(f"process {video.video_id}: format message")
-        message = TelegramClient.format_message(video, summary)
-        log(f"process {video.video_id}: send telegram", essential=True)
-        self.telegram.send_message(message)
-        result_label = "description fallback" if used_description else "summarized"
-        log(f"sent {video.video_id}: {result_label}")
-        return True
 
-    def fetch_transcript(
+class TranscriptService:
+    """Resolves and caches transcripts across native-caption and audio sources."""
+
+    def __init__(
+        self,
+        openai_client: Any,
+        language_preferences: tuple[str, ...],
+    ):
+        self.openai_client = openai_client
+        self.language_preferences = language_preferences
+
+    @staticmethod
+    def exceeds_audio_transcription_limit(video: "Video") -> bool:
+        """Return whether audio fallback is forbidden by the duration limit."""
+        return (
+            video.duration_seconds is not None
+            and video.duration_seconds > MAX_AUDIO_TRANSCRIPTION_DURATION_SECONDS
+        )
+
+    def fetch(
         self,
         video: "Video",
         *,
@@ -396,7 +416,7 @@ class TranscriptSummarizer:
             log(f"process {video.video_id}: native transcript", essential=True)
             transcript_result = TranscriptFetcher.fetch_transcript(
                 video.video_id,
-                preferred_languages=self.transcript_language_preferences,
+                preferred_languages=self.language_preferences,
             )
         except VideoFailure as transcript_exc:
             log(f"transcript fallback {video.video_id}: {transcript_exc}")
@@ -407,7 +427,7 @@ class TranscriptSummarizer:
                 ) from transcript_exc
             try:
                 transcript_result = OpenAIAudioTranscriber.fetch_audio_transcript(
-                    self.openai.client,
+                    self.openai_client,
                     video.video_id,
                     audio_cache_path=audio_cache_path,
                 )
@@ -1508,6 +1528,16 @@ class SubscriptionState:
                 "to reset the schedule state."
             )
         return window_start, window_end
+
+    @staticmethod
+    def complete_window(state_root: Path, window_end: datetime) -> None:
+        """Persist the successfully completed subscription window boundary."""
+        state_dir = SubscriptionState.subscription_state_dir(state_root)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        SubscriptionState.last_subscription_window_end_path(state_root).write_text(
+            window_end.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
+            encoding="utf-8",
+        )
 
 @dataclass(frozen=True)
 
