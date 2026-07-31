@@ -1,52 +1,98 @@
 # Architecture
 
-TextTube is a Docker-first Python application that summarizes recent YouTube subscription uploads and sends one Telegram message per processed video.
+TextTube is a Docker-first functional modular monolith that summarizes recent YouTube subscription uploads and sends one Telegram message per processed video.
 
-This document is the canonical source for structure, data flow, processing rules, state, and failure behavior. [README.md](README.md) is the operator guide. [SUMMARIZER.md](SUMMARIZER.md) is the transcript-summary system prompt.
+This document is canonical for structure, dependency direction, data flow, state, processing rules, and failure behavior. [README.md](README.md) is the operator guide. [SUMMARIZER.md](SUMMARIZER.md) is the transcript-summary prompt contract.
 
 ## Design Constraints
 
 - All language and audio inference runs through OpenAI.
-- The application remains a small Python program without an application framework.
-- Python installation, dependency management, execution, and validation stay inside Docker; the host runs only Docker and Compose commands.
-- Docker Compose is the packaged runtime and pulls the public GitHub Container Registry image.
-- GitHub Actions publishes multi-platform images for 64-bit Intel/AMD and ARM Linux hosts.
-- Compose receives API credentials through process environment variables and stores the Google refresh token only in its managed volume.
+- The application remains a small Python package without an application framework.
+- Business orchestration has no SDK, HTTP, filesystem, or subprocess knowledge.
+- Python installation, execution, and validation stay inside Docker.
+- Docker Compose exposes one service backed by one managed data volume.
 - The official YouTube captions API is not used for caption downloads.
 - Model roles and cost choices are fixed application constants.
 - Scheduled runs are singletons.
 
 ## Repository Layout
 
-- `texttube_app.py` owns application configuration, YouTube access, captions, OpenAI calls, Telegram delivery, CLI behavior, lifecycle handling, and subscription state.
-- `texttube_auth.py` validates Google refresh tokens, manages device authorization, exposes health readiness, and securely stores replacement tokens.
-- `texttube_scheduler.py` parses cron expressions, waits for scheduled occurrences, locks runs, launches the application, and forwards shutdown signals.
+```text
+texttube/
+├── domain.py
+├── config.py
+├── ports.py
+├── pipeline.py
+├── adapters/
+│   ├── google_auth.py
+│   ├── openai.py
+│   ├── scheduler.py
+│   ├── service.py
+│   ├── state.py
+│   ├── telegram.py
+│   ├── transcripts.py
+│   └── youtube.py
+└── entrypoints/
+    ├── app.py
+    ├── auth.py
+    ├── scheduler.py
+    └── service.py
+```
+
+- `domain.py` contains immutable `Video`, `Transcript`, `Summary`, and outcome values plus application-level failures.
+- `ports.py` declares small interfaces for video discovery, transcription, summarization, delivery, state, cache paths, and logging.
+- `pipeline.py` contains readable application and per-video orchestration.
+- `config.py` owns constants, environment loading, normalized runtime options, value parsing, and runtime path discovery.
+- `adapters/` contains every OpenAI, YouTube, Google OAuth, Telegram, HTTP, filesystem, cron, and subprocess implementation.
+- `entrypoints/` parses process commands and constructs dependencies.
+- `texttube_app.py`, `texttube_auth.py`, and `texttube_scheduler.py` are thin compatibility entrypoints.
+- `texttube_service.py` dispatches the unified container modes.
 - `SUMMARIZER.md` defines transcript-summary input and output behavior.
-- `Dockerfile` builds the shared Linux image with `texttube_app.py` as its direct entrypoint.
-- `.github/workflows/publish-container.yaml` builds and publishes the image after pushes to `main`.
-- `compose.yaml` defines the persistent `auth` and `scheduler` services, profiled manual `app` service, health dependency, environment mapping, and named data volume.
-- `compose.local.yaml` overrides the authorization and manual application services with a build from the current repository source.
-- `requirements.txt` pins the Python dependencies.
-- `README.md` documents setup, deployment, commands, and validation.
-- `AGENTS.md` contains repository working conventions.
+- `Dockerfile` builds the shared Linux image.
+- `compose.yaml` defines the single published-image service and managed volume.
+- `compose.local.yaml` replaces the published image with a local build.
 
-## Runtime Layout
+## Dependency Direction
 
-The workflow publishes `ghcr.io/ivribalko/texttube:latest` as a multi-platform image for `linux/amd64` and `linux/arm64`. It also publishes an immutable `sha-<commit>` tag for each source revision. Compose always pulls `latest`, stores immutable application files under `/app`, sets `TEXTTUBE_HOME=/data`, and mounts the managed `texttube-data` volume at `/data/var`:
+Imports point inward:
 
-- `/data/var/state/last_subscription_window_end_utc.txt` stores the last completed subscription cutoff.
-- `/data/var/state/google_oauth_refresh_token` stores the Google refresh token with mode `0600`.
-- `/data/var/cache/<video_id>.txt` stores an optional transcript cache entry.
-- `/data/var/cache/<video_id>.m4a` stores an optional audio cache entry.
-- `/data/var/texttube.lock` serializes scheduled runs.
+```text
+entrypoints → adapters → ports → domain
+     │                      ↑
+     └──────── pipeline ────┘
+```
 
-Manual runs create or reuse cache entries only when `--cache` is present. Temporary uncached audio and chunks are deleted after each video. The scheduler subprocess inherits the scheduler container’s stdout and stderr, so scheduler messages and scheduled application output share one service log. The persistent authorization service has a separate container log, while profiled manual application runs use attached stdout and stderr and are removed by the documented `--rm` workflow. The container runtime manages all retained output through its configured logging driver, and the data volume contains no log copy.
+`pipeline.py` imports only `domain.py` and `ports.py`. Adapters may import domain values, port types, and configuration, but never the pipeline. Entrypoints are the only modules that know concrete adapter combinations. This keeps business flow and infrastructure from importing each other arbitrarily.
 
-The local Compose override builds authorization and manual application services as `texttube:local` while leaving scheduled deployment on the published image.
+## Container Runtime
+
+The workflow publishes `ghcr.io/ivribalko/texttube:latest` for `linux/amd64` and `linux/arm64`, plus an immutable `sha-<commit>` tag. Compose pulls `latest`, sets `TEXTTUBE_HOME=/data`, and mounts `texttube-data` at `/data/var`.
+
+The container entrypoint accepts these modes:
+
+- `serve` runs authorization maintenance and the cron scheduler under one supervisor. This is the Compose default.
+- `app` performs one manual subscription or selected-video run.
+- `auth --once` validates or replaces authorization and exits.
+- `scheduler` runs the scheduler alone for compatibility and diagnostics.
+- `healthcheck` reports whether the stored refresh token was validated recently.
+
+In `serve` mode, authorization maintenance starts first. Scheduling starts after the first successful token validation, matching the former Compose health dependency. Both workers share shutdown state. If either worker exits unexpectedly, the supervisor stops the other and exits nonzero so the container restart policy can recover. Scheduler application runs remain isolated subprocesses, and signals are forwarded to an active subprocess.
+
+Application output, scheduler messages, and authorization instructions use only container stdout and stderr. The managed volume contains no log copy. Manual runs remain attached and are removed by the documented `--rm` workflow.
+
+The managed paths are:
+
+- `/data/var/state/last_subscription_window_end_utc.txt` for the last completed subscription cutoff
+- `/data/var/state/google_oauth_refresh_token` for the mode-`0600` Google refresh token
+- `/data/var/cache/<video_id>.txt` for optional transcript cache entries
+- `/data/var/cache/<video_id>.m4a` for optional audio cache entries
+- `/data/var/texttube.lock` for scheduled-run serialization
+
+Manual runs create or reuse cache entries only with `--cache`. Temporary uncached audio and chunks are deleted after each video.
 
 ## Configuration and Authentication
 
-Compose maps its environment directly into its services. `ConfigLoader` reads process environment values, applies supported command-line overrides, and loads the Google refresh token from the managed volume. `TextTubeScheduler` reads and validates `CRON` independently. Required stack credentials are:
+Compose maps credentials directly into the unified service. Required credentials are:
 
 - `OPENAI_API_KEY`
 - `TELEGRAM_BOT_TOKEN`
@@ -54,102 +100,85 @@ Compose maps its environment directly into its services. `ConfigLoader` reads pr
 - `GOOGLE_OAUTH_CLIENT_ID`
 - `GOOGLE_OAUTH_CLIENT_SECRET`
 
-`TRANSCRIPT_LANGUAGES` is optional and controls native-caption preference order. `TEXTTUBE_LIMIT` and `TEXTTUBE_VERBOSE` provide CLI defaults. `SUMMARIZER_MD` selects the transcript prompt.
+`CRON` is required by `serve` and `scheduler` modes but ignored by manual `app` and `auth` commands. `TRANSCRIPT_LANGUAGES` controls native-caption preference order. `TEXTTUBE_LIMIT` and `TEXTTUBE_VERBOSE` provide application defaults. `SUMMARIZER_MD` selects the transcript prompt outside the packaged Compose workflow.
 
-The Google credentials must use application type `TVs and Limited Input devices`. On startup, the persistent `auth` service exchanges any stored refresh token for an access token to validate it. A successful validation creates container-local readiness, and Compose starts the application services only after the authorization health check passes. Missing or rejected refresh tokens trigger the YouTube read-only device flow: the service shows Google’s verification URL and user code, polls at Google’s requested interval, and atomically writes the returned refresh token to the named volume with owner-only permissions. It never prints the refresh token and requires no callback port or browser inside the container.
+Google credentials must use application type `TVs and Limited Input devices`. Authorization exchanges the stored refresh token for an access token at startup and hourly. A valid token updates container health readiness. A missing or rejected token triggers Google’s YouTube read-only device flow, prints only the verification URL and user code, polls at Google’s required interval, and atomically stores the replacement token with owner-only permissions. The refresh token is never printed or exposed through a Compose environment variable.
 
 ## Application Components
 
-- `TextTubeCli` parses arguments, applies defaults, creates the lifecycle owner, and converts fatal failures into process exit codes.
-- `AuthorizationService` validates the stored token every hour, controls container health readiness, performs replacement device authorization, and owns atomic refresh-token storage.
-- `TextTubeScheduler` validates a five-field expression with `croniter`, waits until each UTC occurrence, acquires the shared lock, and runs TextTube as a subprocess.
-- `TextTubeApp` is the composition root: it wires runtime paths, shared external clients, focused services, and the selected run mode.
-- `YouTubeClient` refreshes Google authorization, traverses subscriptions and upload playlists, enriches video metadata, deduplicates IDs, and enforces the subscription window.
-- `VideoProcessor` owns the per-video use case: skip policy, summary fallback selection, message formatting, and delivery.
-- `TranscriptService` owns transcript source selection and cache I/O, using native captions first and eligible audio transcription second.
-- `TranscriptFetcher` discovers and retrieves native captions through `youtube-transcript-api`, ordered by configured language preference.
-- `OpenAIAudioTranscriber` downloads eligible fallback audio with `yt-dlp`, creates five-minute chunks with `ffmpeg`, and transcribes chunks sequentially with `gpt-transcribe`.
-- `OpenAIClient` uses the official OpenAI Python SDK and Responses API with `gpt-5.6-luna` for transcript and description summaries. Responses summary requests use `store: false`.
-- `DescriptionCleaner` strips links before the description-summary request.
-- `TelegramClient` formats HTML-safe messages, truncates them to Telegram limits, disables link previews, and sends run notices.
-- `SubscriptionState`, `RuntimePaths`, `ValueParser`, `HttpJsonClient`, and `ApplicationLifecycle` provide state, path, parsing, HTTP, signal, and cleanup support.
+- `ApplicationPipeline` owns selected-video and subscription-window use cases, limit behavior, per-video isolation, and cutoff completion.
+- `VideoPipeline` owns short-video policy, the audio eligibility decision, summary fallback selection, and delivery.
+- `YouTubeDiscovery` refreshes Google authorization, traverses subscriptions and upload playlists, enriches metadata, deduplicates IDs, and enforces the subscription window.
+- `TranscriptResolver` uses cached transcripts first, native captions second, and permitted audio transcription last.
+- `NativeTranscriptFetcher` retrieves captions with `youtube-transcript-api` and ranks preferred languages.
+- `OpenAIAudioTranscriber` downloads fallback audio with `yt-dlp`, creates five-minute chunks with `ffmpeg`, and transcribes chunks sequentially with `gpt-transcribe`.
+- `OpenAISummarizer` uses the official OpenAI Python SDK and Responses API with `gpt-5.6-luna`. Summary requests use `store: false`.
+- `TelegramDelivery` formats HTML-safe messages, truncates them to Telegram limits, disables link previews, and sends run notices.
+- `FileSubscriptionState`, `FileCachePaths`, `ConsoleLog`, and `ApplicationLifecycle` adapt filesystem and process concerns.
+- `AuthorizationService`, `CronScheduler`, and `StackService` provide authorization maintenance, isolated scheduling, and single-container supervision.
 
 ## Per-Video Flow
 
-- Videos with a known duration of three minutes or less are treated as probable Shorts and skipped.
+- Videos with a known duration of three minutes or less are probable Shorts and are skipped.
 - A cached transcript is used first when manual cache reuse is enabled.
 - Native captions are attempted next.
 - If native captions fail and the video is no longer than 60 minutes, audio is downloaded, chunked, and transcribed.
-- If native captions fail and the video is longer than 60 minutes, no audio download or transcription is attempted.
+- If native captions fail and the video is longer than 60 minutes, audio is never downloaded or transcribed.
 - The resolved transcript is summarized with the transcript prompt.
-- Any transcript retrieval, audio transcription, or transcript-summary failure switches to a title-guided OpenAI summary of the cleaned video description.
-- If the description request also fails, the message body is `Summary unavailable.`.
-- The final body is sent as one Telegram message with channel, title, and YouTube link.
+- Transcript retrieval, transcription, or transcript-summary failure switches to a title-guided summary of the cleaned description.
+- If description summarization also fails, the message body is `Summary unavailable.`.
+- The final body is delivered with channel, title, and YouTube link.
 
-Exactly 60 minutes remains eligible for audio transcription. The exclusion begins above 60 minutes.
+Exactly 60 minutes remains eligible for audio transcription. Exclusion begins above 60 minutes.
 
 ## Summary Rules
 
-`SUMMARIZER.md` applies only to transcript summaries. When the selected native caption language is known, TextTube prepends `Summary language code: <code>.` to the transcript input.
+`SUMMARIZER.md` applies only to transcript summaries. When the selected caption language is known, TextTube prepends `Summary language code: <code>.` to the transcript input.
 
-Description fallback has a separate code-owned prompt because its source and cleanup requirements differ:
+Description fallback has a separate code-owned prompt:
 
-- The video title establishes relevance but is not an independent factual source.
-- The description supplies the factual content.
+- The title establishes relevance but is not an independent factual source.
+- The description supplies factual content.
 - Links, domains, social handles, promotions, affiliate text, calls to action, contacts, and channel boilerplate are removed.
-- Output remains a compact plain-text paragraph.
+- Output is a compact plain-text paragraph.
 
-The summary model is `gpt-5.6-luna`. The audio transcription model is `gpt-transcribe`. Neither is configurable at runtime.
+The summary model is `gpt-5.6-luna`. The audio transcription model is `gpt-transcribe`. Neither is runtime-configurable.
 
 ## Subscription State and Scheduling
 
-A subscription run records its start time as the prospective window end. The previous completed cutoff is the window start; when no cutoff exists, the start defaults to 24 hours earlier.
+A subscription run records its start time as the prospective window end. The previous completed cutoff is the window start; without a cutoff, the start defaults to 24 hours earlier.
 
-The cutoff is written only after subscription traversal completes. Fatal authentication, subscription, or run-level failures preserve the previous cutoff. Per-video fallbacks and failures do not abort traversal. A manual reset is performed outside the application by deleting the cutoff file while holding the scheduler lock.
+The cutoff is written only after subscription traversal completes. Fatal authentication, subscription, or run-level failures preserve the previous cutoff. Per-video fallbacks and failures do not abort traversal. Resetting the cutoff is an operator action performed while holding the scheduler lock.
 
-The default message limit is 100. Probable Shorts do not count toward it. Successfully delivered transcript or description-fallback messages do count. When the default cap stops a run, TextTube sends a final limit notice.
+The default message limit is 100. Probable Shorts do not count. Delivered transcript, description-fallback, and unavailable-summary messages count. Reaching the default cap sends a final limit notice.
 
 The scheduler:
 
 - requires one standard five-field expression from `CRON`
 - rejects cron shortcuts and invalid expressions before waiting
-- evaluates occurrences in UTC and recalculates after every completed or skipped run
-- inherits the Compose environment and launches each run as an isolated subprocess
-- invokes the application under a non-blocking `fcntl` file lock
-- forwards application output directly to the scheduler container’s standard streams
-- forwards `SIGINT` and `SIGTERM` to an active application subprocess
-
-The authorization service:
-
-- starts with the default Compose stack
-- shares the application’s managed data volume
-- remains unhealthy while no recently validated refresh token exists
-- validates an existing refresh token at startup and every hour
-- automatically performs device authorization when the token is missing or Google returns `invalid_grant`
-- retries transient validation and authorization failures without exposing credentials
-- stays running after authorization so Docker can continuously report health
-
-The manual application and scheduler services declare a Compose dependency on healthy authorization. This gates their startup; Docker Compose does not stop an already-running dependent service if authorization later becomes unhealthy.
+- evaluates occurrences in UTC and recalculates after each run
+- launches the application as an isolated subprocess under a non-blocking `fcntl` lock
+- forwards application streams and shutdown signals
 
 ## Failure Behavior
 
-- Every individual HTTP request is attempted once. The OpenAI client is configured with `max_retries=0`; device authorization performs protocol-required status polling rather than transport retries.
-- Expected per-video failures switch to description fallback or allow later videos to continue.
-- Fatal failures after Telegram initialization trigger a run-level Telegram notice.
+- Every individual HTTP request is attempted once. The OpenAI client uses `max_retries=0`; device authorization performs protocol-required polling.
+- Expected per-video failures use the description fallback or allow later videos to continue.
+- Fatal failures after Telegram construction trigger a run-level notice.
 - Google OAuth `invalid_grant` produces a reauthorization-specific notice and preserves the subscription window.
 - Error details are hidden unless verbose logging is enabled.
-- `SIGINT` and `SIGTERM` close the shared HTTP session and return exit code `130`.
-- Invalid scheduler configuration exits with code `2`; scheduler shutdown signals interrupt waiting and propagate to an active application run.
-- Authorization health is removed before replacement authorization, after failed validation, and during shutdown. Transient Google or network failures retry after one minute.
+- Application `SIGINT` and `SIGTERM` close shared clients and return exit code `130`.
+- Invalid scheduler configuration exits with code `2`.
+- Authorization readiness is removed before replacement authorization, after failed validation, and during shutdown. Transient failures retry after one minute.
 
 ## External Dependencies
 
-- Python standard library modules handle CLI parsing, configuration, files, subprocesses, signals, and state.
-- `requests` handles Google device authorization, token refresh, YouTube Data API calls, and Telegram delivery.
+- Python standard library modules handle CLI parsing, immutable values, files, subprocesses, signals, threads, and state.
+- `requests` handles Google OAuth, YouTube Data API, and Telegram requests.
 - `openai` is the official client for Responses API summaries and audio transcription.
-- `croniter` validates cron expressions and calculates their next UTC occurrence.
+- `croniter` validates expressions and calculates UTC occurrences.
 - `youtube-transcript-api` retrieves native captions.
-- `yt-dlp`, its matching EJS challenge solver, and Deno download eligible fallback audio from YouTube.
-- `ffmpeg` extracts and chunks audio inside the container.
-- Python `fcntl` locking and the util-linux `flock` command coordinate scheduled runs and lock-safe maintenance.
+- `yt-dlp`, its EJS challenge solver, and Deno download eligible fallback audio.
+- `ffmpeg` extracts and chunks audio in the container.
+- Python `fcntl` and util-linux `flock` coordinate scheduled runs and maintenance.
 - GitHub Actions and GitHub Container Registry build and distribute the public runtime image.

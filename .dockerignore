@@ -6,3 +6,6 @@
 !texttube_app.py
 !texttube_auth.py
 !texttube_scheduler.py
+!texttube_service.py
+!texttube/
+!texttube/**

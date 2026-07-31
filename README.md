@@ -33,21 +33,21 @@ Start the stack from the directory containing the deployed `compose.yaml`. On fi
 docker compose up --pull always
 ```
 
-The persistent `auth` service checks the shared volume for a refresh token. When the token is missing, expired, or revoked, it prints Google’s verification URL and device code and polls for approval. Open the URL on any phone or computer, enter the displayed code, and approve YouTube read-only access.
+The unified `texttube` service checks the managed volume for a refresh token. When the token is missing, expired, or revoked, it prints Google’s verification URL and device code and polls for approval. Open the URL on any phone or computer, enter the displayed code, and approve YouTube read-only access.
 
-The `scheduler` waits for `auth` to become healthy. Approval stores the refresh token with owner-only permissions in the managed `texttube-data` volume, the next health check succeeds, and Compose starts the scheduler. The refresh token is never printed or placed in a Compose environment variable.
+The service starts scheduling after authorization becomes healthy. Approval stores the refresh token with owner-only permissions in the managed `texttube-data` volume. The refresh token is never printed or placed in a Compose environment variable.
 
-Deployment interfaces that start Compose in the background must expose the `auth` service logs so the URL and code can be read. Follow those logs from a separate shell when the Compose file is available:
+Deployment interfaces that start Compose in the background must expose the service log so the URL and code can be read. Follow it from a separate shell when the Compose file is available:
 
 ```sh
-docker compose logs --follow auth
+docker compose logs --follow texttube
 ```
 
-The service validates the refresh token when it starts and once per hour. A failed validation makes `auth` unhealthy and automatically prints a new device login. Google authorizations for external apps left in [Testing status expire after seven days](https://support.google.com/cloud/answer/15549945). Production refresh tokens have [no single fixed lifetime](https://developers.google.com/identity/protocols/oauth2#expiration); Google lists revocation, six months without use, time-limited access, and token-count limits among the reasons they can stop working.
+The service validates the refresh token when it starts and once per hour. A failed validation makes `texttube` unhealthy and automatically prints a new device login. Google authorizations for external apps left in [Testing status expire after seven days](https://support.google.com/cloud/answer/15549945). Production refresh tokens have [no single fixed lifetime](https://developers.google.com/identity/protocols/oauth2#expiration); Google lists revocation, six months without use, time-limited access, and token-count limits among the reasons they can stop working.
 
 No callback port, public domain, workstation helper, repository checkout, or `compose.local.yaml` is required on the server.
 
-The manual `app` service belongs to a profile, so starting the stack does not trigger an extra subscription run.
+Manual commands use `docker compose run` and do not disturb the long-running service.
 
 ## Compose Commands
 
@@ -57,7 +57,7 @@ Pull the latest published image:
 docker compose pull
 ```
 
-Recreate the authorization service and scheduler with the latest image:
+Recreate the unified service with the latest image:
 
 ```sh
 docker compose up --detach --pull always
@@ -66,34 +66,34 @@ docker compose up --detach --pull always
 Run one subscription pass:
 
 ```sh
-docker compose --profile manual run --rm app
+docker compose run --rm texttube app
 ```
 
 Run one video with cache reuse and verbose logging:
 
 ```sh
-docker compose --profile manual run --rm app \
+docker compose run --rm texttube app \
   --video "https://www.youtube.com/watch?v=VIDEO_ID" --cache --verbose
 ```
 
 Run without the default 100-message limit:
 
 ```sh
-docker compose --profile manual run --rm app --limit 0
+docker compose run --rm texttube app --limit 0
+```
+
+Validate or replace Google authorization in a one-off container:
+
+```sh
+docker compose run --rm texttube auth --once
 ```
 
 ## Logs
 
-The scheduler and every application process it launches share the `scheduler` service’s standard output and error streams. Follow them with timestamps:
+Authorization, scheduler, and scheduled application output share the `texttube` service’s standard streams. Follow them with timestamps:
 
 ```sh
-docker compose logs --follow --timestamps scheduler
-```
-
-Authorization validation, health transitions, and device login instructions use the `auth` service log:
-
-```sh
-docker compose logs --follow --timestamps auth
+docker compose logs --follow --timestamps texttube
 ```
 
 Read logs retained for all existing Compose service containers:
@@ -102,13 +102,13 @@ Read logs retained for all existing Compose service containers:
 docker compose logs --timestamps
 ```
 
-Manual `app` runs write directly to their attached terminal. The documented commands use `--rm`, so Docker removes each manual container and its logs when the command finishes. Docker’s configured logging driver retains persistent `auth` and `scheduler` output; the managed data volume never contains log files.
+Manual `app` and `auth` runs write directly to their attached terminal. The documented commands use `--rm`, so Docker removes each manual container and its logs when the command finishes. Docker’s configured logging driver retains persistent service output; the managed data volume never contains log files.
 
 ## Runtime Configuration
 
 Compose supplies application values through the process environment. Command-line flags override overlapping runtime defaults. `TEXTTUBE_HOME` is fixed at `/data`, and the built-in `SUMMARIZER.md` is used.
 
-`CRON` is required when starting the scheduler but is not required for manual or authorization runs. It must be a standard five-field cron expression and is evaluated in UTC; shortcuts such as `@daily` are not accepted.
+`CRON` is required by the default `serve` mode but is ignored by manual application and authorization commands. It must be a standard five-field cron expression and is evaluated in UTC; shortcuts such as `@daily` are not accepted.
 
 The model names are application constants rather than operator settings:
 
@@ -135,7 +135,7 @@ Compose persists credentials, state, and caches in the managed `texttube-data` v
 - `/data/var/cache/` stores transcript and audio entries created by manual runs with `--cache`.
 - `/data/var/texttube.lock` enforces singleton scheduled runs.
 
-Removing the OAuth token makes the authorization service request approval again at its next validation; restarting `auth` triggers that check immediately. Deleting the cutoff file resets the next subscription window to the previous 24 hours; the lock-safe maintenance command is documented in [AGENTS.md](AGENTS.md).
+Removing the OAuth token makes the service request approval again at its next validation; restarting `texttube` triggers that check immediately. Deleting the cutoff file resets the next subscription window to the previous 24 hours; the lock-safe maintenance command is documented in [AGENTS.md](AGENTS.md).
 
 ## Validation
 
@@ -148,7 +148,7 @@ TELEGRAM_CHAT_ID=check \
 GOOGLE_OAUTH_CLIENT_ID=check \
 GOOGLE_OAUTH_CLIENT_SECRET=check \
 CRON='your five-field expression' \
-docker compose --profile manual config --quiet
+docker compose config --quiet
 ```
 
 ```sh
@@ -157,10 +157,7 @@ docker build --tag texttube:check .
 
 ```sh
 docker run --rm --entrypoint python texttube:check \
-  -m py_compile \
-  /app/texttube_app.py \
-  /app/texttube_auth.py \
-  /app/texttube_scheduler.py
+  -m compileall -q /app
 ```
 
 ## Container Publication

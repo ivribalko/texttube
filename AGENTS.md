@@ -6,9 +6,9 @@
 - Keep `SUMMARIZER.md` limited to the transcript-summary prompt contract.
 - Keep Markdown synchronized with behavior changes without duplicating one topic across several files.
 - Keep top-of-file source comments aligned with each file’s architectural role without restating detailed behavior.
-- Use Docker Compose as the packaged runtime and scheduled-run workflow.
+- Use one Docker Compose service for authorization maintenance, scheduled runs, and explicit manual commands.
 - Keep `compose.yaml` deployable by itself with the public image, environment variables, and a named data volume.
-- Keep the scheduler implementation in `texttube_scheduler.py`.
+- Keep scheduler implementation in `texttube/adapters/scheduler.py`, dependency construction in `texttube/entrypoints/scheduler.py`, and `texttube_scheduler.py` as a compatibility entrypoint.
 - Keep Compose pinned to the public `ghcr.io/ivribalko/texttube:latest` image.
 - Publish `linux/amd64` and `linux/arm64` images from pushes to `main` with `latest` and immutable commit tags.
 - Keep the application small and avoid framework dependencies.
@@ -33,34 +33,34 @@ Authorize YouTube with the current repository source after configuring the requi
 
 ```sh
 docker compose --file compose.yaml --file compose.local.yaml \
-  run --build --rm auth --once
+  run --build --rm texttube auth --once
 ```
 
 Build and run the current repository source after completing Google authorization:
 
 ```sh
 docker compose --file compose.yaml --file compose.local.yaml \
-  --profile manual run --build --rm app
+  run --build --rm texttube app
 ```
 
 Run one selected video by passing its URL or ID after the service name:
 
 ```sh
 docker compose --file compose.yaml --file compose.local.yaml \
-  --profile manual run --build --rm app \
+  run --build --rm texttube app \
   --video "https://www.youtube.com/watch?v=VIDEO_ID" \
   --cache \
   --verbose
 ```
 
-Append application arguments such as `--video URL_OR_ID`, `--cache`, `--limit N`, or `--verbose` after `app`. The local override preserves the Compose-managed environment and data volume while replacing the published image for authorization and manual runs with a build from the current source. Manual-run output remains in the live terminal, and `--rm` removes the container when it exits.
+Append application arguments such as `--video URL_OR_ID`, `--cache`, `--limit N`, or `--verbose` after `app`. The local override preserves the Compose-managed environment and data volume while replacing the published image with a build from the current source. Manual-run output remains in the live terminal, and `--rm` removes the container when it exits.
 
 ## Subscription Cutoff
 
 The application has no cutoff-reset flag or environment variable. To reset the subscription window manually, delete the cutoff file from the named volume while holding the scheduler lock:
 
 ```sh
-docker compose exec scheduler flock /data/var/texttube.lock \
+docker compose exec texttube flock /data/var/texttube.lock \
   rm --force /data/var/state/last_subscription_window_end_utc.txt
 ```
 
@@ -70,7 +70,7 @@ The command waits for an active scheduled run to finish before deleting its save
 
 - Do not run Python commands on the host; run every Python workflow inside Docker.
 - Build with `docker build --tag texttube:check .` before Python validation.
-- Compile image sources with `docker run --rm --entrypoint python texttube:check -m py_compile /app/texttube_app.py /app/texttube_auth.py /app/texttube_scheduler.py`.
+- Compile image sources with `docker run --rm --entrypoint python texttube:check -m compileall -q /app`.
 - Validate authorization health states, scheduler cron parsing, and Compose interpolation without rendering secrets.
 - Use a representative manual run only when the user explicitly requests application execution.
 - Before committing, run `git diff --check` and inspect the staged diff for credentials or personal data.

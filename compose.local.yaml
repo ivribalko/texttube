@@ -1,14 +1,8 @@
-# Builds authorization and manual services from the current repository source.
-
-x-texttube-local-service: &texttube-local-service
-  build:
-    context: .
-  image: texttube:local
-  pull_policy: never
+# Builds the unified service from the current repository source.
 
 services:
-  auth:
-    <<: *texttube-local-service
-
-  app:
-    <<: *texttube-local-service
+  texttube:
+    build:
+      context: .
+    image: texttube:local
+    pull_policy: never

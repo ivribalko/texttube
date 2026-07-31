@@ -17,6 +17,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir --requirement requirements.txt
 
-COPY SUMMARIZER.md texttube_app.py texttube_auth.py texttube_scheduler.py ./
+COPY SUMMARIZER.md texttube_app.py texttube_auth.py texttube_scheduler.py texttube_service.py ./
+COPY texttube ./texttube
 
-ENTRYPOINT ["python", "/app/texttube_app.py"]
+ENTRYPOINT ["python", "/app/texttube_service.py"]
+CMD ["serve"]
