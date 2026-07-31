@@ -120,6 +120,7 @@ The model names are application constants rather than operator settings:
 - Videos up to three minutes long are treated as probable Shorts and skipped.
 - Videos longer than 60 minutes may use native captions but never download or transcribe audio.
 - A failed transcript path falls back to a title-guided summary of the cleaned video description.
+- If the description summary also fails, TextTube sends `Summary unavailable.`.
 - The subscription cutoff advances after the run finishes, including runs where individual videos use fallbacks.
 - Scheduled runs never overlap.
 

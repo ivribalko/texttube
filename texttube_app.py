@@ -48,6 +48,7 @@ GOOGLE_OAUTH_AUTH_COMMAND = (
     "--profile auth run --build --rm auth"
 )
 GENERIC_RUN_FAILURE_MESSAGE = "TextTube run failed."
+SUMMARY_UNAVAILABLE_MESSAGE = "Summary unavailable."
 GOOGLE_OAUTH_REAUTHORIZATION_MESSAGE = (
     "TextTube could not access YouTube because Google authorization expired or was revoked. "
     "Run {auth_command} to reconnect YouTube. The next run will process the preserved "
@@ -376,7 +377,7 @@ class VideoProcessor:
                 f"{exception_log_message(exc)}",
                 essential=True,
             )
-            return DescriptionCleaner.clean(video.description), True
+            return SUMMARY_UNAVAILABLE_MESSAGE, True
 
 
 class TranscriptService:
@@ -1029,44 +1030,17 @@ class OpenAIClient:
 
 
 class DescriptionCleaner:
-    """Removes links and obvious channel boilerplate for a last-resort fallback."""
+    """Removes links before description text is sent to the summary model."""
 
     LINK_PATTERN = re.compile(
         r"(?i)(?:https?://|www\.)\S+|"
         r"\b[\w.-]+\.(?:com|org|net|io|co|tv|me|gg|ly)(?:/\S*)?"
     )
-    UNRELATED_PATTERN = re.compile(
-        r"(?i)\b(?:subscribe|sponsor(?:ed)?|affiliate|discount|coupon|promo code|"
-        r"merch|patreon|newsletter|follow (?:me|us)|social media|contact|business inquiries)\b"
-    )
-
     @classmethod
     def prepare_for_model(cls, description: str) -> str:
         """Strip links before sending description text to OpenAI."""
         without_links = cls.LINK_PATTERN.sub("", html.unescape(description))
         return "\n".join(line.strip() for line in without_links.splitlines() if line.strip())
-
-    @classmethod
-    def clean(cls, description: str) -> str:
-        """Return a concise link-free description if OpenAI is unavailable."""
-        prepared = cls.prepare_for_model(description)
-        relevant_lines: list[str] = []
-        for line in prepared.splitlines():
-            if cls.UNRELATED_PATTERN.search(line):
-                continue
-            if re.fullmatch(r"[\W_]*", line):
-                continue
-            relevant_lines.append(line)
-            if len(" ".join(relevant_lines)) >= 600:
-                break
-
-        cleaned = " ".join(relevant_lines)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        if not cleaned:
-            return "No essential facts."
-        if len(cleaned) > 700:
-            cleaned = cleaned[:697].rsplit(" ", 1)[0].rstrip(" ,;:") + "..."
-        return cleaned
 
 class TelegramClient:
     """Formats and sends Telegram messages, including run-level notices."""

@@ -70,7 +70,7 @@ The Google credentials must use application type `TVs and Limited Input devices`
 - `TranscriptFetcher` discovers and retrieves native captions through `youtube-transcript-api`, ordered by configured language preference.
 - `OpenAIAudioTranscriber` downloads eligible fallback audio with `yt-dlp`, creates five-minute chunks with `ffmpeg`, and transcribes chunks sequentially with `gpt-transcribe`.
 - `OpenAIClient` uses the official OpenAI Python SDK and Responses API with `gpt-5.6-luna` for transcript and description summaries. Responses summary requests use `store: false`.
-- `DescriptionCleaner` strips links and obvious promotional boilerplate before the description request and provides deterministic cleanup if that request fails.
+- `DescriptionCleaner` strips links before the description-summary request.
 - `TelegramClient` formats HTML-safe messages, truncates them to Telegram limits, disables link previews, and sends run notices.
 - `SubscriptionState`, `RuntimePaths`, `ValueParser`, `HttpJsonClient`, and `ApplicationLifecycle` provide state, path, parsing, HTTP, signal, and cleanup support.
 
@@ -83,7 +83,7 @@ The Google credentials must use application type `TVs and Limited Input devices`
 - If native captions fail and the video is longer than 60 minutes, no audio download or transcription is attempted.
 - The resolved transcript is summarized with the transcript prompt.
 - Any transcript retrieval, audio transcription, or transcript-summary failure switches to a title-guided OpenAI summary of the cleaned video description.
-- If the description request also fails, deterministic link-free description cleanup supplies the message body.
+- If the description request also fails, the message body is `Summary unavailable.`.
 - The final body is sent as one Telegram message with channel, title, and YouTube link.
 
 Exactly 60 minutes remains eligible for audio transcription. The exclusion begins above 60 minutes.
