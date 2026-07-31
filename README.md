@@ -1,6 +1,6 @@
 # TextTube
 
-TextTube watches recent YouTube subscription uploads, creates concise summaries with OpenAI, and sends one Telegram message per processed video. Docker Compose pulls the public multi-platform image from GitHub Container Registry and provides persistent scheduling, manual runs, and one-shot Google authorization.
+TextTube watches recent YouTube subscription uploads, creates concise summaries with OpenAI, and sends one Telegram message per processed video. Docker Compose pulls the public multi-platform image from GitHub Container Registry and provides persistent Google authorization, scheduling, and manual runs.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for processing rules, failure behavior, and component design. The transcript-summary prompt is [SUMMARIZER.md](SUMMARIZER.md).
 
@@ -25,22 +25,29 @@ In the [Google Cloud console](https://console.cloud.google.com/):
 
 [Desktop-app OAuth credentials do not work with the device authorization service](https://developers.google.com/youtube/v3/guides/auth/devices).
 
-## Authorize YouTube
+## Start and Authorize YouTube
 
-Run the one-shot authorization service from the repository root:
+Start the stack from the directory containing the deployed `compose.yaml`. On first startup, keep Compose attached so the authorization URL and device code remain visible:
 
 ```sh
-docker compose --file compose.yaml --file compose.local.yaml \
-  --profile auth run --build --rm auth
+docker compose up --pull always
 ```
 
-Open the displayed Google verification URL on any phone or computer, enter the displayed code, and approve YouTube read-only access. The container polls Google at the requested interval and then stores the refresh token with owner-only permissions in the managed `texttube-data` volume. The refresh token is never printed or placed in a Compose environment variable.
+The persistent `auth` service checks the shared volume for a refresh token. When the token is missing, expired, or revoked, it prints Google’s verification URL and device code and polls for approval. Open the URL on any phone or computer, enter the displayed code, and approve YouTube read-only access.
 
-Run the same command again whenever Google authorization expires or is revoked. No callback port, public domain, workstation helper, or `.secrets` file is required.
+The `scheduler` waits for `auth` to become healthy. Approval stores the refresh token with owner-only permissions in the managed `texttube-data` volume, the next health check succeeds, and Compose starts the scheduler. The refresh token is never printed or placed in a Compose environment variable.
 
-Start the stack after authorization. Compose pulls `ghcr.io/ivribalko/texttube:latest`. Only the persistent Python `scheduler` service starts by default. It waits for each `CRON` occurrence, prevents overlapping runs with a file lock, and launches TextTube as an isolated process.
+Deployment interfaces that start Compose in the background must expose the `auth` service logs so the URL and code can be read. Follow those logs from a separate shell when the Compose file is available:
 
-The `app` and `auth` services belong to profiles, so starting the stack does not trigger an extra subscription run or authorization session.
+```sh
+docker compose logs --follow auth
+```
+
+The service validates the refresh token when it starts and once per hour. A failed validation makes `auth` unhealthy and automatically prints a new device login. Google authorizations for external apps left in [Testing status expire after seven days](https://support.google.com/cloud/answer/15549945). Production refresh tokens have [no single fixed lifetime](https://developers.google.com/identity/protocols/oauth2#expiration); Google lists revocation, six months without use, time-limited access, and token-count limits among the reasons they can stop working.
+
+No callback port, public domain, workstation helper, repository checkout, or `compose.local.yaml` is required on the server.
+
+The manual `app` service belongs to a profile, so starting the stack does not trigger an extra subscription run.
 
 ## Compose Commands
 
@@ -50,7 +57,7 @@ Pull the latest published image:
 docker compose pull
 ```
 
-Recreate the scheduler with the latest image:
+Recreate the authorization service and scheduler with the latest image:
 
 ```sh
 docker compose up --detach --pull always
@@ -59,23 +66,20 @@ docker compose up --detach --pull always
 Run one subscription pass:
 
 ```sh
-docker compose --file compose.yaml --file compose.local.yaml \
-  --profile manual run --build --rm app
+docker compose --profile manual run --rm app
 ```
 
 Run one video with cache reuse and verbose logging:
 
 ```sh
-docker compose --file compose.yaml --file compose.local.yaml \
-  --profile manual run --build --rm app \
+docker compose --profile manual run --rm app \
   --video "https://www.youtube.com/watch?v=VIDEO_ID" --cache --verbose
 ```
 
 Run without the default 100-message limit:
 
 ```sh
-docker compose --file compose.yaml --file compose.local.yaml \
-  --profile manual run --build --rm app --limit 0
+docker compose --profile manual run --rm app --limit 0
 ```
 
 ## Logs
@@ -86,13 +90,19 @@ The scheduler and every application process it launches share the `scheduler` se
 docker compose logs --follow --timestamps scheduler
 ```
 
+Authorization validation, health transitions, and device login instructions use the `auth` service log:
+
+```sh
+docker compose logs --follow --timestamps auth
+```
+
 Read logs retained for all existing Compose service containers:
 
 ```sh
 docker compose logs --timestamps
 ```
 
-Manual `app` and authorization `auth` runs write directly to their attached terminal. The documented commands use `--rm`, so Docker removes each one-shot container and its logs when the command finishes. Docker’s configured logging driver retains scheduler output; the managed data volume never contains log files.
+Manual `app` runs write directly to their attached terminal. The documented commands use `--rm`, so Docker removes each manual container and its logs when the command finishes. Docker’s configured logging driver retains persistent `auth` and `scheduler` output; the managed data volume never contains log files.
 
 ## Runtime Configuration
 
@@ -124,7 +134,7 @@ Compose persists credentials, state, and caches in the managed `texttube-data` v
 - `/data/var/cache/` stores transcript and audio entries created by manual runs with `--cache`.
 - `/data/var/texttube.lock` enforces singleton scheduled runs.
 
-Removing the OAuth token requires running the authorization service again. Deleting the cutoff file resets the next subscription window to the previous 24 hours; the lock-safe maintenance command is documented in [AGENTS.md](AGENTS.md).
+Removing the OAuth token makes the authorization service request approval again at its next validation; restarting `auth` triggers that check immediately. Deleting the cutoff file resets the next subscription window to the previous 24 hours; the lock-safe maintenance command is documented in [AGENTS.md](AGENTS.md).
 
 ## Validation
 
@@ -137,7 +147,7 @@ TELEGRAM_CHAT_ID=check \
 GOOGLE_OAUTH_CLIENT_ID=check \
 GOOGLE_OAUTH_CLIENT_SECRET=check \
 CRON='your five-field expression' \
-docker compose --profile auth --profile manual config --quiet
+docker compose --profile manual config --quiet
 ```
 
 ```sh

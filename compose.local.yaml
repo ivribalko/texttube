@@ -1,4 +1,4 @@
-# Builds one-shot services from the current repository source.
+# Builds authorization and manual services from the current repository source.
 
 x-texttube-local-service: &texttube-local-service
   build:

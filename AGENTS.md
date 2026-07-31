@@ -33,7 +33,7 @@ Authorize YouTube with the current repository source after configuring the requi
 
 ```sh
 docker compose --file compose.yaml --file compose.local.yaml \
-  --profile auth run --build --rm auth
+  run --build --rm auth --once
 ```
 
 Build and run the current repository source after completing Google authorization:
@@ -71,6 +71,6 @@ The command waits for an active scheduled run to finish before deleting its save
 - Do not run Python commands on the host; run every Python workflow inside Docker.
 - Build with `docker build --tag texttube:check .` before Python validation.
 - Compile image sources with `docker run --rm --entrypoint python texttube:check -m py_compile /app/texttube_app.py /app/texttube_auth.py /app/texttube_scheduler.py`.
-- Validate scheduler cron parsing and Compose interpolation without rendering secrets.
+- Validate authorization health states, scheduler cron parsing, and Compose interpolation without rendering secrets.
 - Use a representative manual run only when the user explicitly requests application execution.
 - Before committing, run `git diff --check` and inspect the staged diff for credentials or personal data.

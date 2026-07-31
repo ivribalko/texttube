@@ -19,13 +19,13 @@ This document is the canonical source for structure, data flow, processing rules
 ## Repository Layout
 
 - `texttube_app.py` owns application configuration, YouTube access, captions, OpenAI calls, Telegram delivery, CLI behavior, lifecycle handling, and subscription state.
-- `texttube_auth.py` runs one containerized Google device authorization session and securely stores its refresh token.
+- `texttube_auth.py` validates Google refresh tokens, manages device authorization, exposes health readiness, and securely stores replacement tokens.
 - `texttube_scheduler.py` parses cron expressions, waits for scheduled occurrences, locks runs, launches the application, and forwards shutdown signals.
 - `SUMMARIZER.md` defines transcript-summary input and output behavior.
 - `Dockerfile` builds the shared Linux image with `texttube_app.py` as its direct entrypoint.
 - `.github/workflows/publish-container.yaml` builds and publishes the image after pushes to `main`.
-- `compose.yaml` defines the one-shot `auth` service, manual `app` service, persistent Python `scheduler` service, environment mapping, and named data volume.
-- `compose.local.yaml` overrides the one-shot `auth` and manual `app` services with a build from the current repository source.
+- `compose.yaml` defines the persistent `auth` and `scheduler` services, profiled manual `app` service, health dependency, environment mapping, and named data volume.
+- `compose.local.yaml` overrides the authorization and manual application services with a build from the current repository source.
 - `requirements.txt` pins the Python dependencies.
 - `README.md` documents setup, deployment, commands, and validation.
 - `AGENTS.md` contains repository working conventions.
@@ -40,7 +40,7 @@ The workflow publishes `ghcr.io/ivribalko/texttube:latest` as a multi-platform i
 - `/data/var/cache/<video_id>.m4a` stores an optional audio cache entry.
 - `/data/var/texttube.lock` serializes scheduled runs.
 
-Manual runs create or reuse cache entries only when `--cache` is present. Temporary uncached audio and chunks are deleted after each video. The scheduler subprocess inherits the scheduler container’s stdout and stderr, so scheduler messages and scheduled application output share one service log. Manual application and authorization containers use attached stdout and stderr; the documented `--rm` workflow removes those containers and their retained logs when they exit. The container runtime manages all retained output through its configured logging driver, and the data volume contains no log copy.
+Manual runs create or reuse cache entries only when `--cache` is present. Temporary uncached audio and chunks are deleted after each video. The scheduler subprocess inherits the scheduler container’s stdout and stderr, so scheduler messages and scheduled application output share one service log. The persistent authorization service has a separate container log, while profiled manual application runs use attached stdout and stderr and are removed by the documented `--rm` workflow. The container runtime manages all retained output through its configured logging driver, and the data volume contains no log copy.
 
 The local Compose override builds authorization and manual application services as `texttube:local` while leaving scheduled deployment on the published image.
 
@@ -56,12 +56,12 @@ Compose maps its environment directly into its services. `ConfigLoader` reads pr
 
 `TRANSCRIPT_LANGUAGES` is optional and controls native-caption preference order. `TEXTTUBE_LIMIT` and `TEXTTUBE_VERBOSE` provide CLI defaults. `SUMMARIZER_MD` selects the transcript prompt.
 
-The Google credentials must use application type `TVs and Limited Input devices`. The profiled `auth` service requests the YouTube read-only scope, shows Google’s verification URL and user code, polls at Google’s requested interval, and atomically writes the returned refresh token to the named volume with owner-only permissions. It never prints the refresh token and requires no callback port or browser inside the container.
+The Google credentials must use application type `TVs and Limited Input devices`. On startup, the persistent `auth` service exchanges any stored refresh token for an access token to validate it. A successful validation creates container-local readiness, and Compose starts the application services only after the authorization health check passes. Missing or rejected refresh tokens trigger the YouTube read-only device flow: the service shows Google’s verification URL and user code, polls at Google’s requested interval, and atomically writes the returned refresh token to the named volume with owner-only permissions. It never prints the refresh token and requires no callback port or browser inside the container.
 
 ## Application Components
 
 - `TextTubeCli` parses arguments, applies defaults, creates the lifecycle owner, and converts fatal failures into process exit codes.
-- `texttube_auth.py` performs the device authorization protocol and owns atomic refresh-token storage.
+- `AuthorizationService` validates the stored token every hour, controls container health readiness, performs replacement device authorization, and owns atomic refresh-token storage.
 - `TextTubeScheduler` validates a five-field expression with `croniter`, waits until each UTC occurrence, acquires the shared lock, and runs TextTube as a subprocess.
 - `TextTubeApp` wires runtime paths, a shared general-purpose HTTP session, the official OpenAI client, configuration, prompt loading, API clients, and the selected run mode.
 - `YouTubeClient` refreshes Google authorization, traverses subscriptions and upload playlists, enriches video metadata, deduplicates IDs, and enforces the subscription window.
@@ -120,10 +120,15 @@ The scheduler:
 
 The authorization service:
 
-- runs only through the `auth` profile
+- starts with the default Compose stack
 - shares the application’s managed data volume
-- performs one interactive device authorization session and exits
-- can safely replace an expired or revoked refresh token
+- remains unhealthy while no recently validated refresh token exists
+- validates an existing refresh token at startup and every hour
+- automatically performs device authorization when the token is missing or Google returns `invalid_grant`
+- retries transient validation and authorization failures without exposing credentials
+- stays running after authorization so Docker can continuously report health
+
+The manual application and scheduler services declare a Compose dependency on healthy authorization. This gates their startup; Docker Compose does not stop an already-running dependent service if authorization later becomes unhealthy.
 
 ## Failure Behavior
 
@@ -134,6 +139,7 @@ The authorization service:
 - Error details are hidden unless verbose logging is enabled.
 - `SIGINT` and `SIGTERM` close the shared HTTP session and return exit code `130`.
 - Invalid scheduler configuration exits with code `2`; scheduler shutdown signals interrupt waiting and propagate to an active application run.
+- Authorization health is removed before replacement authorization, after failed validation, and during shutdown. Transient Google or network failures retry after one minute.
 
 ## External Dependencies
 
