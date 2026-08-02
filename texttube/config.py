@@ -79,7 +79,7 @@ class RuntimePaths:
         return cls(code_root=code_root, state_root=state_root)
 
     def prompt_path(self) -> Path:
-        """Resolve the transcript-summary prompt path."""
+        """Resolve the summary prompt document path."""
         configured = os.environ.get("SUMMARIZER_MD", "").strip()
         if not configured:
             return self.code_root / "SUMMARIZER.md"

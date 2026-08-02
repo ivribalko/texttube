@@ -3,7 +3,7 @@
 - Read `ARCHITECTURE.md` before starting work and preserve its design.
 - Keep `README.md` focused on operator setup, deployment, commands, and validation.
 - Keep `ARCHITECTURE.md` canonical for components, data flow, state, processing rules, and failure behavior.
-- Keep `SUMMARIZER.md` limited to the transcript-summary prompt contract.
+- Keep `SUMMARIZER.md` limited to the transcript and description summary prompt contracts.
 - Keep Markdown synchronized with behavior changes without duplicating one topic across several files.
 - Keep top-of-file source comments aligned with each file’s architectural role without restating detailed behavior.
 - Use one Docker Compose service for authorization maintenance, scheduled runs, and explicit manual commands.
@@ -17,8 +17,8 @@
 - Keep application output on container stdout and stderr and tee each app run to a timestamped log in the managed data volume.
 - Use `OPENAI_API_KEY` for all model API calls.
 - Use the official OpenAI Python SDK for all OpenAI API calls.
-- Keep the transcript-summary prompt in `SUMMARIZER.md`.
-- Keep description-fallback requirements in `ARCHITECTURE.md` and the code-owned fallback prompt.
+- Keep the transcript and description summary prompts in `SUMMARIZER.md`.
+- Keep description-fallback requirements synchronized between `ARCHITECTURE.md` and its `SUMMARIZER.md` contract.
 - Prefer constants over new configuration parameters unless configurability is explicitly requested.
 - Do not use the official YouTube captions API for caption downloads; use `youtube-transcript-api` and eligible OpenAI audio transcription fallback.
 - Preserve the rule that videos longer than 60 minutes never download or transcribe audio.

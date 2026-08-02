@@ -10,6 +10,7 @@ from texttube.adapters.openai import (
     OpenAIAudioTranscriber,
     OpenAISummarizer,
     import_openai,
+    split_summary_prompts,
 )
 from texttube.adapters.state import (
     ApplicationLifecycle,
@@ -104,10 +105,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
         prompt_path = paths.prompt_path()
         if not prompt_path.exists():
             raise FatalError(f"Missing summarizer prompt file: {prompt_path}")
-        system_prompt = prompt_path.read_text(encoding="utf-8").strip()
-        if not system_prompt:
+        prompt_document = prompt_path.read_text(encoding="utf-8").strip()
+        if not prompt_document:
             raise FatalError(f"Summarizer prompt file is empty: {prompt_path}")
-        system_prompt = system_prompt.replace(
+        transcript_prompt, description_prompt = split_summary_prompts(prompt_document)
+        transcript_prompt = transcript_prompt.replace(
             "{{TRANSCRIPT_LANGUAGES}}",
             ", ".join(options.transcript_languages),
         )
@@ -134,7 +136,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
         )
         video_pipeline = VideoPipeline(
             transcription,
-            OpenAISummarizer(openai_sdk, system_prompt, log),
+            OpenAISummarizer(
+                openai_sdk,
+                transcript_prompt,
+                description_prompt,
+                log,
+            ),
             delivery,
             FileCachePaths(paths, enabled=options.cache),
             policy,

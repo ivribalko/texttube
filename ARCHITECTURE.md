@@ -2,7 +2,7 @@
 
 TextTube is a Docker-first functional modular monolith that summarizes recent YouTube subscription uploads and sends one Telegram message per processed video.
 
-This document is canonical for structure, dependency direction, data flow, state, processing rules, and failure behavior. [README.md](README.md) is the operator guide. [SUMMARIZER.md](SUMMARIZER.md) is the transcript-summary prompt contract.
+This document is canonical for structure, dependency direction, data flow, state, processing rules, and failure behavior. [README.md](README.md) is the operator guide. [SUMMARIZER.md](SUMMARIZER.md) contains the summary prompt contracts.
 
 ## Design Constraints
 
@@ -45,7 +45,7 @@ texttube/
 - `config.py` owns constants, environment loading, normalized runtime options, value parsing, and runtime path discovery.
 - `adapters/` contains every OpenAI, YouTube, Google OAuth, Telegram, HTTP, filesystem, cron, and subprocess implementation.
 - `entrypoints/` contains the executable `app`, `auth`, `scheduler`, and `service` process surfaces. These modules parse commands, construct dependencies, and are launched with `python -m`.
-- `SUMMARIZER.md` defines transcript-summary input and output behavior.
+- `SUMMARIZER.md` defines transcript and description summary input and output behavior.
 - `Dockerfile` builds the shared Linux image.
 - `compose.yaml` defines the single published-image service and managed volume.
 - `compose.local.yaml` replaces the published image with a local build and loads the required repository-root `.env` file.
@@ -103,7 +103,7 @@ Compose maps credentials directly into the unified service. Required credentials
 
 Local source runs use the Git-ignored repository-root `.env` file through `compose.local.yaml`. Published-image deployments continue to accept values from the Compose environment without requiring that file.
 
-`CRON` is required by `serve` and `scheduler` modes but ignored by manual `app` and `auth` commands. `TRANSCRIPT_LANGUAGES` controls native-caption preference order and acceptable transcript-summary languages. `TEXTTUBE_LIMIT` and `TEXTTUBE_VERBOSE` provide application defaults. `SUMMARIZER_MD` selects the transcript prompt outside the packaged Compose workflow.
+`CRON` is required by `serve` and `scheduler` modes but ignored by manual `app` and `auth` commands. `TRANSCRIPT_LANGUAGES` controls native-caption preference order and acceptable transcript-summary languages. `TEXTTUBE_LIMIT` and `TEXTTUBE_VERBOSE` provide application defaults. `SUMMARIZER_MD` selects the summary prompt document outside the packaged Compose workflow.
 
 Google credentials must use application type `TVs and Limited Input devices`. Authorization exchanges the stored refresh token for an access token at startup and hourly. A valid token updates container health readiness. A missing or rejected token triggers Google’s YouTube read-only device flow, prints only the verification URL and user code, polls at Google’s required interval, and atomically stores the replacement token with owner-only permissions. The refresh token is never printed or exposed through a Compose environment variable.
 
@@ -137,9 +137,9 @@ Exactly 60 minutes remains eligible for audio transcription. Exclusion applies w
 
 ## Summary Rules
 
-`SUMMARIZER.md` applies only to transcript summaries. TextTube passes YouTube's selected caption language code or default audio language code when known, plus the `TRANSCRIPT_LANGUAGES` preferences. A transcript already in a preferred language is summarized in that language. For a transcript outside the preferred languages, including cached or audio text without language metadata, the model chooses the most appropriate preferred language and translates the summary into it. Without preferences, a known source language remains the summary language and unknown-language text uses its dominant language.
+`SUMMARIZER.md` contains required top-level transcript and description prompt sections. Startup validates and separates them before constructing the summarizer. TextTube passes YouTube's selected caption language code or default audio language code when known, plus the `TRANSCRIPT_LANGUAGES` preferences, only to the transcript contract. A transcript already in a preferred language is summarized in that language. For a transcript outside the preferred languages, including cached or audio text without language metadata, the model chooses the most appropriate preferred language and translates the summary into it. Without preferences, a known source language remains the summary language and unknown-language text uses its dominant language.
 
-Description fallback has a separate code-owned prompt:
+The description fallback contract is the second section of `SUMMARIZER.md`:
 
 - The title establishes relevance but is not an independent factual source.
 - The description supplies factual content.

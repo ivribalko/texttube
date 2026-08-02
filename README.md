@@ -2,7 +2,7 @@
 
 TextTube watches recent YouTube subscription uploads, creates concise summaries with OpenAI, and sends one Telegram message per processed video. Docker Compose pulls the public multi-platform image from GitHub Container Registry and provides persistent Google authorization, scheduling, and manual runs.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for processing rules, failure behavior, and component design. The transcript-summary prompt is [SUMMARIZER.md](SUMMARIZER.md).
+See [ARCHITECTURE.md](ARCHITECTURE.md) for processing rules, failure behavior, and component design. The summary prompts are in [SUMMARIZER.md](SUMMARIZER.md).
 
 ## Requirements
 

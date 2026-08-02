@@ -21,15 +21,38 @@ from texttube.config import (
 from texttube.domain import FatalError, Transcript, Video, VideoFailure
 from texttube.ports import Log
 
-DESCRIPTION_SUMMARIZER_PROMPT = """Summarize a YouTube video from its title and description.
+TRANSCRIPT_SUMMARIZER_HEADING = "# Transcript summarizer"
+DESCRIPTION_SUMMARIZER_HEADING = "# Description summarizer"
 
-Return one compact plain-text paragraph of 1 to 3 short sentences in the
-description's dominant language. Keep only facts that describe the video's
-actual subject. Remove every URL, domain, social handle, sponsor or affiliate
-message, discount, merchandise pitch, subscription request, channel boilerplate,
-contact detail, and other unrelated information. Do not mention that the source
-was a title or description. If no relevant facts remain, return exactly:
-No essential facts."""
+
+def split_summary_prompts(document: str) -> tuple[str, str]:
+    """Split and validate the transcript and description prompt contracts."""
+    normalized = document.strip()
+    description_marker = f"\n{DESCRIPTION_SUMMARIZER_HEADING}\n"
+    if not normalized.startswith(f"{TRANSCRIPT_SUMMARIZER_HEADING}\n"):
+        raise FatalError(
+            f"Summary prompt must start with `{TRANSCRIPT_SUMMARIZER_HEADING}`."
+        )
+    transcript_prompt, separator, description_body = normalized.partition(
+        description_marker
+    )
+    transcript_body = transcript_prompt.removeprefix(
+        TRANSCRIPT_SUMMARIZER_HEADING
+    ).strip()
+    if not transcript_body:
+        raise FatalError(
+            "Summary prompt must contain a nonempty "
+            f"`{TRANSCRIPT_SUMMARIZER_HEADING}` section."
+        )
+    if not separator or not description_body.strip():
+        raise FatalError(
+            "Summary prompt must contain a nonempty "
+            f"`{DESCRIPTION_SUMMARIZER_HEADING}` section."
+        )
+    return (
+        transcript_prompt.strip(),
+        f"{DESCRIPTION_SUMMARIZER_HEADING}\n{description_body.strip()}",
+    )
 
 
 def import_openai() -> Any:
@@ -63,9 +86,16 @@ class DescriptionCleaner:
 class OpenAISummarizer:
     """Creates transcript and description summaries through the Responses API."""
 
-    def __init__(self, client: Any, system_prompt: str, log: Log):
+    def __init__(
+        self,
+        client: Any,
+        transcript_prompt: str,
+        description_prompt: str,
+        log: Log,
+    ):
         self.client = client
-        self.system_prompt = system_prompt
+        self.transcript_prompt = transcript_prompt
+        self.description_prompt = description_prompt
         self.log = log
 
     def _generate(self, prompt: str, *, instructions: str) -> str:
@@ -99,7 +129,7 @@ class OpenAISummarizer:
         )
         if not prompt:
             raise VideoFailure("summary unavailable: transcript was empty")
-        return self._summarize(prompt, instructions=self.system_prompt)
+        return self._summarize(prompt, instructions=self.transcript_prompt)
 
     def summarize_description(self, video: Video) -> str:
         """Summarize cleaned video metadata when transcript processing fails."""
@@ -109,7 +139,7 @@ class OpenAISummarizer:
         prompt = f"Title: {video.title.strip()}\n\nDescription:\n{cleaned_description}"
         summary = self._summarize(
             prompt,
-            instructions=DESCRIPTION_SUMMARIZER_PROMPT,
+            instructions=self.description_prompt,
         )
         link_free_summary = DescriptionCleaner.prepare_for_model(summary)
         if not link_free_summary:
