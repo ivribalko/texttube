@@ -104,9 +104,14 @@ class VideoPipeline:
                 audio_cache_path=self.cache_paths.audio(video.video_id),
                 transcript_cache_path=self.cache_paths.transcript(video.video_id),
             )
-            self.log.write(f"process {video.video_id}: summarize", essential=True)
+            self.log.write(
+                f"process {video.video_id}: summarize transcript "
+                f"language={transcript.language_code or 'unknown'} "
+                f"chars={len(transcript.text)} lines={len(transcript.text.splitlines())}",
+                essential=True,
+            )
             return Summary(
-                text=self.summarization.summarize_transcript(transcript),
+                text=self.summarization.summarize_transcript(video, transcript),
                 source=SummarySource.TRANSCRIPT,
             )
         except VideoFailure as exc:

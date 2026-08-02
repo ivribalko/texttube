@@ -185,7 +185,8 @@ class NativeTranscriptFetcher:
                 text = "\n".join(lines).strip()
                 if text:
                     self.log.write(
-                        f"transcript native: ok {video_id}: {len(lines)} lines"
+                        f"transcript native: ok {video_id}: lang={language_code} "
+                        f"chars={len(text)} lines={len(lines)}"
                     )
                     return Transcript(text=text, language_code=language_code)
             except transcript_errors as exc:
@@ -197,7 +198,6 @@ class NativeTranscriptFetcher:
                 f"transcript unavailable: {self.log.exception(last_error)}"
             ) from last_error
         raise VideoFailure("transcript unavailable: transcript was empty")
-
 
 class TranscriptResolver:
     """Resolves cached, native-caption, or permitted audio transcripts."""
@@ -224,7 +224,11 @@ class TranscriptResolver:
         if transcript_cache_path and transcript_cache_path.exists():
             cached = transcript_cache_path.read_text(encoding="utf-8").strip()
             if cached:
-                self.log.write(f"transcript cache: hit {transcript_cache_path.name}")
+                self.log.write(
+                    f"transcript cache: hit {transcript_cache_path.name}: "
+                    f"language=unknown chars={len(cached)} "
+                    f"lines={len(cached.splitlines())}"
+                )
                 return Transcript(text=cached)
         try:
             self.log.write(

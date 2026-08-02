@@ -80,6 +80,8 @@ In `serve` mode, authorization maintenance starts first. Scheduling starts after
 
 Application output, scheduler messages, and authorization instructions remain visible on container stdout and stderr. Each scheduled or manual `app` invocation also writes its visible application output to a UTC-timestamped file in the managed volume. App startup removes run logs that are 30 days old or older. Manual runs remain attached and are removed by the documented `--rm` workflow without removing their volume-backed run logs.
 
+Verbose application logging records the summary source, language hint, input and prompt fingerprints, model output, duration, and failures. Transcript and description input text and credentials are never logged.
+
 The managed paths are:
 
 - `/data/var/state/last_subscription_window_end_utc.txt` for the last completed subscription cutoff

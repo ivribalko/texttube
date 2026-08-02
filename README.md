@@ -124,6 +124,8 @@ Each scheduled or manual application run also writes its visible output to a sep
 docker compose exec texttube ls -l /data/var/logs
 ```
 
+Verbose application logs include the summary source, language hint, input and prompt fingerprints, model output, duration, and failures. Transcript and description input texts are never printed.
+
 Manual `app` and `auth` runs still write directly to their attached terminal. The documented `app --rm` workflow removes its one-off container while preserving the application run file in the managed volume. Authorization and scheduler-only messages remain standard-stream output and are available through Docker’s configured logging driver.
 
 ## Runtime Configuration

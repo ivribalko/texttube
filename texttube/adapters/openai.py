@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import re
 import shutil
@@ -23,6 +24,11 @@ from texttube.ports import Log
 
 TRANSCRIPT_SUMMARIZER_HEADING = "# Transcript summarizer"
 DESCRIPTION_SUMMARIZER_HEADING = "# Description summarizer"
+
+
+def content_fingerprint(content: str) -> str:
+    """Return a stable digest for correlating content without logging its text."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def split_summary_prompts(document: str) -> tuple[str, str]:
@@ -121,7 +127,7 @@ class OpenAISummarizer:
             raise VideoFailure(f"OpenAI returned no text for {OPENAI_SUMMARY_MODEL}")
         return generated
 
-    def summarize_transcript(self, transcript: Transcript) -> str:
+    def summarize_transcript(self, video: Video, transcript: Transcript) -> str:
         """Summarize transcript text using the repository prompt contract."""
         prompt = self.build_summary_prompt(
             transcript.text,
@@ -129,44 +135,80 @@ class OpenAISummarizer:
         )
         if not prompt:
             raise VideoFailure("summary unavailable: transcript was empty")
-        return self._summarize(prompt, instructions=self.transcript_prompt)
+        return self._summarize(
+            prompt,
+            instructions=self.transcript_prompt,
+            video_id=video.video_id,
+            source="transcript",
+        )
 
     def summarize_description(self, video: Video) -> str:
         """Summarize cleaned video metadata when transcript processing fails."""
         cleaned_description = DescriptionCleaner.prepare_for_model(video.description)
         if not cleaned_description:
             raise VideoFailure("description summary unavailable: description was empty")
+        self.log.write(
+            f"summary: description cleaned video={video.video_id} "
+            f"chars={len(video.description)}->{len(cleaned_description)}"
+        )
         prompt = f"Title: {video.title.strip()}\n\nDescription:\n{cleaned_description}"
         summary = self._summarize(
             prompt,
             instructions=self.description_prompt,
+            video_id=video.video_id,
+            source="description",
         )
         link_free_summary = DescriptionCleaner.prepare_for_model(summary)
         if not link_free_summary:
             raise VideoFailure("description summary unavailable: only links remained")
-        return re.sub(r"\s+", " ", link_free_summary).strip()
+        normalized_summary = re.sub(r"\s+", " ", link_free_summary).strip()
+        self.log.write(
+            f"summary: description final video={video.video_id} "
+            f"chars={len(summary)}->{len(normalized_summary)}"
+        )
+        return normalized_summary
 
-    def _summarize(self, prompt: str, *, instructions: str) -> str:
+    def _summarize(
+        self,
+        prompt: str,
+        *,
+        instructions: str,
+        video_id: str,
+        source: str,
+    ) -> str:
         """Run one timed summary request and normalize its output."""
         started_at = time.monotonic()
         try:
-            self.log.write(f"summary: request model={OPENAI_SUMMARY_MODEL}")
+            self.log.write(
+                f"summary: request video={video_id} source={source} "
+                f"model={OPENAI_SUMMARY_MODEL} chars={len(prompt)} "
+                f"input_sha256={content_fingerprint(prompt)} "
+                f"instructions_sha256={content_fingerprint(instructions)}"
+            )
             summary = self._generate(prompt, instructions=instructions).strip()
             if not summary:
                 raise VideoFailure("summary unavailable: model returned an empty response")
-            self.log.write(f"summary: ok model={OPENAI_SUMMARY_MODEL}")
-            self.log.write(f"summary result model={OPENAI_SUMMARY_MODEL}:\n{summary}")
+            self.log.write(
+                f"summary: ok video={video_id} source={source} "
+                f"model={OPENAI_SUMMARY_MODEL} chars={len(summary)} "
+                f"lines={len(summary.splitlines())}"
+            )
+            self.log.write(
+                f"summary: result video={video_id} source={source}:\n{summary}"
+            )
             return summary
         except VideoFailure as exc:
             self.log.write(
-                f"summary: failed model={OPENAI_SUMMARY_MODEL}: "
+                f"summary: failed video={video_id} source={source} "
+                f"model={OPENAI_SUMMARY_MODEL}: "
                 f"{self.log.exception(exc)}"
             )
             raise VideoFailure(f"summary unavailable: {exc}") from exc
         finally:
             elapsed = time.monotonic() - started_at
             self.log.write(
-                f"summary: duration model={OPENAI_SUMMARY_MODEL}: elapsed={elapsed:.1f}s",
+                f"summary: duration video={video_id} source={source} "
+                f"model={OPENAI_SUMMARY_MODEL}: elapsed={elapsed:.1f}s",
                 essential=True,
             )
 
@@ -316,7 +358,10 @@ class OpenAIAudioTranscriber:
                 self.log.write(
                     f"transcript audio: ok {video_id}: openai {len(chunk_paths)} chunks"
                 )
-                self.log.write(f"transcript audio result {video_id}:\n{text}")
+                self.log.write(
+                    f"transcript audio: result {video_id}: chars={len(text)} "
+                    f"lines={len(text.splitlines())} sha256={content_fingerprint(text)}"
+                )
                 return Transcript(text=text)
         finally:
             duration = time.perf_counter() - started_at
