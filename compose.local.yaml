@@ -4,5 +4,7 @@ services:
   texttube:
     build:
       context: .
+    env_file:
+      - .env
     image: texttube:local
     pull_policy: never

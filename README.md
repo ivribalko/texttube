@@ -49,6 +49,28 @@ No callback port, public domain, workstation helper, repository checkout, or `co
 
 Manual commands use `docker compose run` and do not disturb the long-running service.
 
+## Local Source Runs
+
+Keep local Compose configuration in a repository-root `.env` file. The file is ignored by Git, and `compose.local.yaml` requires and loads it for containers built from the current source. Define the required credentials listed under [Requirements](#requirements), plus `CRON` when running the default `serve` mode.
+
+Authorize YouTube with the current source:
+
+```sh
+docker compose --env-file .env \
+  --file compose.yaml --file compose.local.yaml \
+  run --build --rm texttube auth --once
+```
+
+Run one subscription pass with the current source:
+
+```sh
+docker compose --env-file .env \
+  --file compose.yaml --file compose.local.yaml \
+  run --build --rm texttube app
+```
+
+Append application arguments after `app` for a selected-video or diagnostic run.
+
 ## Compose Commands
 
 Pull the latest published image:
@@ -110,6 +132,8 @@ Compose supplies application values through the process environment. Command-lin
 
 `CRON` is required by the default `serve` mode but is ignored by manual application and authorization commands. It must be a standard five-field cron expression and is evaluated in UTC; shortcuts such as `@daily` are not accepted.
 
+`TRANSCRIPT_LANGUAGES` is an ordered, comma-separated list. When YouTube's default audio language belongs to that list, its native captions are attempted first; otherwise configured order is preserved. Captions in every other available language follow. YouTube's caption or default-audio language code is passed to transcript summarization when available. A transcript already in one of the configured languages is summarized in the same language; for any other transcript language, the model chooses the most appropriate configured language and translates the summary into it. Audio is downloaded and transcribed only when every available native caption fails.
+
 The model names are application constants rather than operator settings:
 
 - `gpt-5.6-luna` generates transcript and description summaries.
@@ -118,7 +142,7 @@ The model names are application constants rather than operator settings:
 ## Important Processing Boundaries
 
 - Videos up to three minutes long are treated as probable Shorts and skipped.
-- Videos longer than 60 minutes may use native captions but never download or transcribe audio.
+- Videos with unknown duration or a duration longer than 60 minutes may use native captions but never download or transcribe audio.
 - A failed transcript path falls back to a title-guided summary of the cleaned video description.
 - If the description summary also fails, TextTube sends `Summary unavailable.`.
 - The subscription cutoff advances after the run finishes, including runs where individual videos use fallbacks.

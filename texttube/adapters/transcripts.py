@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -40,8 +41,15 @@ class NativeTranscriptFetcher:
         cls,
         candidates: list[Any],
         preferred_languages: tuple[str, ...],
+        original_audio_language: str = "",
     ) -> tuple[int, int] | None:
-        """Infer the preferred rank represented by original generated captions."""
+        """Find the configured rank for YouTube's original audio language."""
+        normalized_original_language = original_audio_language.strip().lower()
+        if normalized_original_language:
+            return cls.transcript_language_match_rank(
+                normalized_original_language,
+                preferred_languages,
+            )
         ranks: list[tuple[int, int]] = []
         for transcript in candidates:
             if not bool(getattr(transcript, "is_generated", False)):
@@ -59,12 +67,15 @@ class NativeTranscriptFetcher:
         cls,
         candidates: list[Any],
         preferred_languages: tuple[str, ...],
+        original_audio_language: str = "",
     ) -> list[Any]:
-        """Order matching candidates while preserving stable fallbacks."""
+        """Prefer configured original-audio captions, then stable fallbacks."""
         if not preferred_languages:
             return candidates
         original_audio_rank = cls.select_original_audio_language_rank(
-            candidates, preferred_languages
+            candidates,
+            preferred_languages,
+            original_audio_language,
         )
         ranked: list[tuple[tuple[int, int], int, Any]] = []
         fallback: list[tuple[int, Any]] = []
@@ -76,7 +87,7 @@ class NativeTranscriptFetcher:
             if rank is None:
                 fallback.append((original_index, transcript))
                 continue
-            if original_audio_rank is not None and rank == original_audio_rank:
+            if original_audio_rank is not None and rank[0] == original_audio_rank[0]:
                 rank = (-1, rank[1])
             ranked.append((rank, original_index, transcript))
         if not ranked:
@@ -86,7 +97,12 @@ class NativeTranscriptFetcher:
         ordered.extend(transcript for _, transcript in fallback)
         return ordered
 
-    def fetch(self, video_id: str) -> Transcript:
+    def fetch(
+        self,
+        video_id: str,
+        *,
+        original_audio_language: str = "",
+    ) -> Transcript:
         """Fetch the first nonempty transcript in preference order."""
         self.log.write(f"transcript native: list {video_id}")
         try:
@@ -131,14 +147,20 @@ class NativeTranscriptFetcher:
                 f"{video_id}: {', '.join(self.language_preferences)}"
             )
             original_audio_rank = self.select_original_audio_language_rank(
-                candidates, self.language_preferences
+                candidates,
+                self.language_preferences,
+                original_audio_language,
             )
             if original_audio_rank is not None:
                 self.log.write(
                     "transcript native: original audio language matched preference "
                     f"{video_id}: {self.language_preferences[original_audio_rank[0]]}"
                 )
-        candidates = self.order_candidates(candidates, self.language_preferences)
+        candidates = self.order_candidates(
+            candidates,
+            self.language_preferences,
+            original_audio_language,
+        )
         last_error: Exception | None = None
         for transcript in candidates:
             try:
@@ -208,19 +230,36 @@ class TranscriptResolver:
             self.log.write(
                 f"process {video.video_id}: native transcript", essential=True
             )
-            result = self.native.fetch(video.video_id)
+            result = self.native.fetch(
+                video.video_id,
+                original_audio_language=video.default_audio_language,
+            )
         except VideoFailure as transcript_exc:
             self.log.write(f"transcript fallback {video.video_id}: {transcript_exc}")
             if not allow_audio:
+                ineligible_reason = (
+                    "video duration is unknown"
+                    if video.duration_seconds is None
+                    else "video exceeds 60 minutes"
+                )
                 raise VideoFailure(
-                    f"{transcript_exc}; audio transcription skipped because video exceeds "
-                    "60 minutes"
+                    f"{transcript_exc}; audio transcription skipped because "
+                    f"{ineligible_reason}"
                 ) from transcript_exc
             try:
                 result = self.audio.fetch(
                     video.video_id,
                     audio_cache_path=audio_cache_path,
                 )
+                if not result.language_code and video.default_audio_language:
+                    result = replace(
+                        result,
+                        language_code=video.default_audio_language,
+                    )
+                    self.log.write(
+                        "transcript audio: YouTube default language "
+                        f"{video.video_id}: {video.default_audio_language}"
+                    )
             except VideoFailure as audio_exc:
                 raise VideoFailure(f"{transcript_exc}; {audio_exc}") from audio_exc
         if transcript_cache_path:

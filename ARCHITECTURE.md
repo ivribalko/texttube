@@ -48,7 +48,7 @@ texttube/
 - `SUMMARIZER.md` defines transcript-summary input and output behavior.
 - `Dockerfile` builds the shared Linux image.
 - `compose.yaml` defines the single published-image service and managed volume.
-- `compose.local.yaml` replaces the published image with a local build.
+- `compose.local.yaml` replaces the published image with a local build and loads the required repository-root `.env` file.
 
 ## Dependency Direction
 
@@ -101,7 +101,9 @@ Compose maps credentials directly into the unified service. Required credentials
 - `GOOGLE_OAUTH_CLIENT_ID`
 - `GOOGLE_OAUTH_CLIENT_SECRET`
 
-`CRON` is required by `serve` and `scheduler` modes but ignored by manual `app` and `auth` commands. `TRANSCRIPT_LANGUAGES` controls native-caption preference order. `TEXTTUBE_LIMIT` and `TEXTTUBE_VERBOSE` provide application defaults. `SUMMARIZER_MD` selects the transcript prompt outside the packaged Compose workflow.
+Local source runs use the Git-ignored repository-root `.env` file through `compose.local.yaml`. Published-image deployments continue to accept values from the Compose environment without requiring that file.
+
+`CRON` is required by `serve` and `scheduler` modes but ignored by manual `app` and `auth` commands. `TRANSCRIPT_LANGUAGES` controls native-caption preference order and acceptable transcript-summary languages. `TEXTTUBE_LIMIT` and `TEXTTUBE_VERBOSE` provide application defaults. `SUMMARIZER_MD` selects the transcript prompt outside the packaged Compose workflow.
 
 Google credentials must use application type `TVs and Limited Input devices`. Authorization exchanges the stored refresh token for an access token at startup and hourly. A valid token updates container health readiness. A missing or rejected token triggers Google’s YouTube read-only device flow, prints only the verification URL and user code, polls at Google’s required interval, and atomically stores the replacement token with owner-only permissions. The refresh token is never printed or exposed through a Compose environment variable.
 
@@ -111,7 +113,7 @@ Google credentials must use application type `TVs and Limited Input devices`. Au
 - `VideoPipeline` owns short-video policy, the audio eligibility decision, summary fallback selection, and delivery.
 - `YouTubeDiscovery` refreshes Google authorization, traverses subscriptions and upload playlists, enriches metadata, deduplicates IDs, and enforces the subscription window.
 - `TranscriptResolver` uses cached transcripts first, native captions second, and permitted audio transcription last.
-- `NativeTranscriptFetcher` retrieves captions with `youtube-transcript-api` and ranks preferred languages.
+- `NativeTranscriptFetcher` retrieves captions with `youtube-transcript-api`, promotes YouTube's default audio language when it is configured, and otherwise ranks configured languages in order.
 - `OpenAIAudioTranscriber` downloads fallback audio with `yt-dlp`, creates five-minute chunks with `ffmpeg`, and transcribes chunks sequentially with `gpt-transcribe`.
 - `OpenAISummarizer` uses the official OpenAI Python SDK and Responses API with `gpt-5.6-luna`. Summary requests use `store: false`.
 - `TelegramDelivery` formats HTML-safe messages, truncates them to Telegram limits, disables link previews, and sends run notices.
@@ -122,19 +124,20 @@ Google credentials must use application type `TVs and Limited Input devices`. Au
 
 - Videos with a known duration of three minutes or less are probable Shorts and are skipped.
 - A cached transcript is used first when manual cache reuse is enabled.
-- Native captions are attempted next.
-- If native captions fail and the video is no longer than 60 minutes, audio is downloaded, chunked, and transcribed.
-- If native captions fail and the video is longer than 60 minutes, audio is never downloaded or transcribed.
+- Native captions are attempted next. YouTube's default audio language is first when it belongs to `TRANSCRIPT_LANGUAGES`; otherwise configured order is preserved. Every other available language follows.
+- Any nonempty native transcript is summarized and translated when needed before audio fallback is considered.
+- Only when every native caption fails and the video has a known duration no longer than 60 minutes is audio downloaded, chunked, and transcribed.
+- If native captions fail and the duration is unknown or longer than 60 minutes, audio is never downloaded or transcribed.
 - The resolved transcript is summarized with the transcript prompt.
 - Transcript retrieval, transcription, or transcript-summary failure switches to a title-guided summary of the cleaned description.
 - If description summarization also fails, the message body is `Summary unavailable.`.
 - The final body is delivered with channel, title, and YouTube link.
 
-Exactly 60 minutes remains eligible for audio transcription. Exclusion begins above 60 minutes.
+Exactly 60 minutes remains eligible for audio transcription. Exclusion applies when duration is unknown or above 60 minutes.
 
 ## Summary Rules
 
-`SUMMARIZER.md` applies only to transcript summaries. When the selected caption language is known, TextTube prepends `Summary language code: <code>.` to the transcript input.
+`SUMMARIZER.md` applies only to transcript summaries. TextTube passes YouTube's selected caption language code or default audio language code when known, plus the `TRANSCRIPT_LANGUAGES` preferences. A transcript already in a preferred language is summarized in that language. For a transcript outside the preferred languages, including cached or audio text without language metadata, the model chooses the most appropriate preferred language and translates the summary into it. Without preferences, a known source language remains the summary language and unknown-language text uses its dominant language.
 
 Description fallback has a separate code-owned prompt:
 

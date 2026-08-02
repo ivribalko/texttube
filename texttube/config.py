@@ -231,7 +231,7 @@ class ConfigLoader:
 
     @staticmethod
     def parse_transcript_languages(raw_value: str) -> tuple[str, ...]:
-        """Normalize comma-separated transcript language preferences."""
+        """Normalize comma-separated caption and summary language preferences."""
         preferences: list[str] = []
         for raw_part in raw_value.split(TRANSCRIPT_LANGUAGE_SEPARATOR):
             language_code = raw_part.strip().lower()

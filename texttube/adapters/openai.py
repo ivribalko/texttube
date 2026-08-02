@@ -141,8 +141,12 @@ class OpenAISummarizer:
             )
 
     @staticmethod
-    def build_summary_prompt(transcript: str, *, language_code: str = "") -> str:
-        """Attach a language hint to nonempty transcript text."""
+    def build_summary_prompt(
+        transcript: str,
+        *,
+        language_code: str = "",
+    ) -> str:
+        """Attach the YouTube source language fact when available."""
         cleaned_transcript = transcript.strip()
         if not cleaned_transcript:
             return ""
@@ -150,7 +154,7 @@ class OpenAISummarizer:
         if not normalized_language_code:
             return cleaned_transcript
         return (
-            f"Summary language code: {normalized_language_code}.\n\n"
+            f"YouTube source language code: {normalized_language_code}.\n\n"
             f"{cleaned_transcript}"
         )
 

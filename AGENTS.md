@@ -32,21 +32,24 @@
 Authorize YouTube with the current repository source after configuring the required environment variables:
 
 ```sh
-docker compose --file compose.yaml --file compose.local.yaml \
+docker compose --env-file .env \
+  --file compose.yaml --file compose.local.yaml \
   run --build --rm texttube auth --once
 ```
 
 Build and run the current repository source after completing Google authorization:
 
 ```sh
-docker compose --file compose.yaml --file compose.local.yaml \
+docker compose --env-file .env \
+  --file compose.yaml --file compose.local.yaml \
   run --build --rm texttube app
 ```
 
 Run one selected video by passing its URL or ID after the service name:
 
 ```sh
-docker compose --file compose.yaml --file compose.local.yaml \
+docker compose --env-file .env \
+  --file compose.yaml --file compose.local.yaml \
   run --build --rm texttube app \
   --video "https://www.youtube.com/watch?v=VIDEO_ID" \
   --cache \

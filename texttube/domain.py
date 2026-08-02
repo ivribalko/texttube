@@ -48,6 +48,7 @@ class Video:
     channel_title: str
     published_at: datetime
     duration_seconds: int | None = None
+    default_audio_language: str = ""
     description: str = ""
     tags: tuple[str, ...] = ()
 
@@ -88,4 +89,3 @@ class RunOutcome:
 
     delivered_count: int
     stopped_by_limit: bool = False
-

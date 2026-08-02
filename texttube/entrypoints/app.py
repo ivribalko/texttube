@@ -107,6 +107,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
         system_prompt = prompt_path.read_text(encoding="utf-8").strip()
         if not system_prompt:
             raise FatalError(f"Summarizer prompt file is empty: {prompt_path}")
+        system_prompt = system_prompt.replace(
+            "{{TRANSCRIPT_LANGUAGES}}",
+            ", ".join(options.transcript_languages),
+        )
 
         requests_module = import_requests()
         session = requests_module.Session()

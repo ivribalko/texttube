@@ -109,6 +109,9 @@ class YouTubeDiscovery:
             duration_seconds=ValueParser.parse_iso8601_duration_seconds(
                 str(content_details.get("duration", "")).strip()
             ),
+            default_audio_language=str(
+                snippet.get("defaultAudioLanguage", "")
+            ).strip().lower(),
             description=str(snippet.get("description", "")).strip(),
             tags=tags,
         )
@@ -213,6 +216,9 @@ class YouTubeDiscovery:
                     duration_seconds=ValueParser.parse_iso8601_duration_seconds(
                         str(content_details.get("duration", "")).strip()
                     ),
+                    default_audio_language=str(
+                        snippet.get("defaultAudioLanguage", "")
+                    ).strip().lower(),
                     tags=tags,
                 )
         self.log.write(f"videos metadata: enriched {len(by_id)}")

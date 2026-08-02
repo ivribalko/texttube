@@ -65,8 +65,8 @@ class VideoPipeline:
     def is_audio_allowed(self, video: Video) -> bool:
         """Return whether audio fallback is permitted for the known duration."""
         return (
-            video.duration_seconds is None
-            or video.duration_seconds <= self.policy.max_audio_duration_seconds
+            video.duration_seconds is not None
+            and video.duration_seconds <= self.policy.max_audio_duration_seconds
         )
 
     def process(self, video: Video) -> VideoOutcome:
