@@ -44,7 +44,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
             startup_ready=authorization_ready,
         )
         expression = CronScheduler.validate_expression(os.environ.get("CRON", ""))
-        scheduler = CronScheduler(expression, stop_requested=stop_requested)
+        schedule_timezone = CronScheduler.validate_timezone(os.environ.get("TZ", ""))
+        scheduler = CronScheduler(
+            expression,
+            schedule_timezone=schedule_timezone,
+            stop_requested=stop_requested,
+        )
         service = StackService(
             authorization,
             scheduler,

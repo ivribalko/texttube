@@ -14,9 +14,10 @@ INVALID_CONFIGURATION_EXIT_CODE = 2
 
 
 def build_scheduler() -> CronScheduler:
-    """Construct a validated scheduler from the CRON environment value."""
+    """Construct a validated scheduler from CRON and TZ environment values."""
     expression = CronScheduler.validate_expression(os.environ.get("CRON", ""))
-    return CronScheduler(expression)
+    schedule_timezone = CronScheduler.validate_timezone(os.environ.get("TZ", ""))
+    return CronScheduler(expression, schedule_timezone=schedule_timezone)
 
 
 def main(arguments: Sequence[str] | None = None) -> int:

@@ -16,6 +16,7 @@ services:
       TEXTTUBE_LIMIT: "${TEXTTUBE_LIMIT:-}"
       TEXTTUBE_VERBOSE: "${TEXTTUBE_VERBOSE:-}"
       TRANSCRIPT_LANGUAGES: "${TRANSCRIPT_LANGUAGES:-}"
+      TZ: "${TZ:-UTC}"
     healthcheck:
       test: [CMD, python, -m, texttube.entrypoints.auth, --healthcheck]
       interval: 5s

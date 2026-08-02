@@ -105,7 +105,7 @@ Compose maps credentials directly into the unified service. Required credentials
 
 Local source runs use the Git-ignored repository-root `.env` file through `compose.local.yaml`. Published-image deployments continue to accept values from the Compose environment without requiring that file.
 
-`CRON` is required by `serve` and `scheduler` modes but ignored by manual `app` and `auth` commands. `TRANSCRIPT_LANGUAGES` controls native-caption preference order and acceptable transcript-summary languages. `TEXTTUBE_LIMIT` and `TEXTTUBE_VERBOSE` provide application defaults. `SUMMARIZER_MD` selects the summary prompt document outside the packaged Compose workflow.
+`CRON` is required by `serve` and `scheduler` modes but ignored by manual `app` and `auth` commands. `TZ` is an IANA timezone for cron evaluation and container-local log timestamps; Compose defaults it to `UTC`. Subscription boundaries and run-log filenames remain in UTC. `TRANSCRIPT_LANGUAGES` controls native-caption preference order and acceptable transcript-summary languages. `TEXTTUBE_LIMIT` and `TEXTTUBE_VERBOSE` provide application defaults. `SUMMARIZER_MD` selects the summary prompt document outside the packaged Compose workflow.
 
 Google credentials must use application type `TVs and Limited Input devices`. Authorization exchanges the stored refresh token for an access token at startup and hourly. A valid token updates container health readiness. A missing or rejected token triggers Google’s YouTube read-only device flow, prints only the verification URL and user code, polls at Google’s required interval, and atomically stores the replacement token with owner-only permissions. The refresh token is never printed or exposed through a Compose environment variable.
 
@@ -161,8 +161,9 @@ The default message limit is 100. Probable Shorts do not count. Delivered transc
 The scheduler:
 
 - requires one standard five-field expression from `CRON`
+- validates the Compose-provided `TZ` IANA timezone name at startup
 - rejects cron shortcuts and invalid expressions before waiting
-- evaluates occurrences in UTC and recalculates after each run
+- evaluates occurrences in the configured timezone and recalculates after each run
 - launches the application as an isolated subprocess under a non-blocking `fcntl` lock
 - forwards application streams and shutdown signals
 
@@ -182,7 +183,7 @@ The scheduler:
 - Python standard library modules handle CLI parsing, immutable values, files, subprocesses, signals, threads, and state.
 - `requests` handles Google OAuth, YouTube Data API, and Telegram requests.
 - `openai` is the official client for Responses API summaries and audio transcription.
-- `croniter` validates expressions and calculates UTC occurrences.
+- `croniter` validates expressions and calculates occurrences using Python's IANA timezone data.
 - `youtube-transcript-api` retrieves native captions.
 - `yt-dlp`, its EJS challenge solver, and Deno download eligible fallback audio.
 - `ffmpeg` extracts and chunks audio in the container.

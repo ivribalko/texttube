@@ -240,7 +240,7 @@ class ConfigLoader:
             if not re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]{2,8})*", language_code):
                 raise FatalError(
                     f"Invalid transcript language preference '{raw_part.strip()}'. "
-                    "Use comma-separated language codes such as en,en-us,ru."
+                    "Use comma-separated BCP 47 language codes."
                 )
             if language_code not in preferences:
                 preferences.append(language_code)

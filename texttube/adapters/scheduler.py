@@ -9,6 +9,7 @@ import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 
@@ -29,9 +30,11 @@ class CronScheduler:
         self,
         expression: str,
         *,
+        schedule_timezone: ZoneInfo,
         stop_requested: threading.Event | None = None,
     ):
         self.expression = expression
+        self.schedule_timezone = schedule_timezone
         self.stop_requested = stop_requested or threading.Event()
         self.child: subprocess.Popen[bytes] | None = None
 
@@ -47,6 +50,19 @@ class CronScheduler:
             raise ValueError("CRON is not a valid cron expression.")
         return expression
 
+    @staticmethod
+    def validate_timezone(name: str) -> ZoneInfo:
+        """Resolve a required IANA timezone name."""
+        normalized = name.strip()
+        if not normalized:
+            raise ValueError("TZ must contain an IANA timezone name.")
+        try:
+            return ZoneInfo(normalized)
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            raise ValueError(
+                f"TZ must be a valid IANA timezone name: {normalized}"
+            ) from exc
+
     def handle_signal(self, signum: int) -> None:
         """Stop future runs and forward shutdown to an active child."""
         self.stop_requested.set()
@@ -58,20 +74,26 @@ class CronScheduler:
             pass
 
     def next_run(self) -> datetime:
-        """Calculate the next occurrence in UTC."""
+        """Calculate the next occurrence in the configured timezone."""
         return croniter(
             self.expression,
-            datetime.now(timezone.utc),
+            datetime.now(self.schedule_timezone),
         ).get_next(datetime)
 
     def run(self) -> int:
         """Wait and invoke application subprocesses until shutdown."""
         while not self.stop_requested.is_set():
             next_run = self.next_run()
-            scheduler_log(f"next run utc: {next_run.isoformat(timespec='seconds')}")
+            scheduler_log(
+                f"next run {self.schedule_timezone.key}: "
+                f"{next_run.isoformat(timespec='seconds')}"
+            )
             wait_seconds = max(
                 0.0,
-                (next_run - datetime.now(timezone.utc)).total_seconds(),
+                (
+                    next_run.astimezone(timezone.utc)
+                    - datetime.now(timezone.utc)
+                ).total_seconds(),
             )
             if self.stop_requested.wait(wait_seconds):
                 break
