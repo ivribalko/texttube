@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import Sequence
 
 from texttube.adapters.openai import (
@@ -80,14 +81,23 @@ def import_requests():
 
 def main(arguments: Sequence[str] | None = None) -> int:
     """Construct adapters, execute one application run, and map failures to exits."""
-    log = ConsoleLog(verbose=False)
+    paths = RuntimePaths.discover()
+    try:
+        log = ConsoleLog(verbose=False, log_dir=paths.log_dir())
+    except OSError as exc:
+        print(f"TextTube could not initialize its run log: {exc}", file=sys.stderr)
+        return 1
     lifecycle = ApplicationLifecycle(log)
+    lifecycle.add_cleanup(log.close)
     lifecycle.install_signal_handlers()
     delivery: TelegramDelivery | None = None
     try:
+        log.write(
+            f"run log: {paths.display_path(log.path)}",
+            essential=True,
+        )
         options = ConfigLoader.load_runtime_options(parse_args(arguments))
         log.verbose = options.verbose
-        paths = RuntimePaths.discover()
         log.write("startup: parse args")
         log.write("startup: load config")
         config = ConfigLoader.load_app_config(paths.google_refresh_token_path())
@@ -188,4 +198,3 @@ def _notify_run_failure(
         delivery.send_notice(message)
     except Exception:
         log.write("telegram run failure notification failed", essential=True)
-

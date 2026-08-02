@@ -12,6 +12,8 @@ from texttube.config import (
     AUDIO_CACHE_EXTENSION,
     CACHE_DIR_NAME,
     LAST_SUBSCRIPTION_WINDOW_END_FILE,
+    LOG_FILE_PREFIX,
+    LOG_RETENTION_DAYS,
     SUBSCRIPTION_STATE_DIR_NAME,
     TRANSCRIPT_CACHE_EXTENSION,
     RuntimePaths,
@@ -21,23 +23,76 @@ from texttube.domain import FatalError
 
 
 class ConsoleLog:
-    """Writes concise operator logs and hides exception details by default."""
+    """Writes concise operator logs to stderr and an optional run file."""
 
-    def __init__(self, verbose: bool):
+    def __init__(self, verbose: bool, log_dir: Path | None = None):
         self.verbose = verbose
+        self.path: Path | None = None
+        self._file = None
+        if log_dir is not None:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+            self.path = log_dir / f"{LOG_FILE_PREFIX}{timestamp}.log"
+            self._file = self.path.open("x", encoding="utf-8")
+            self._remove_expired_logs(log_dir)
 
     def write(self, message: str, *, essential: bool = False) -> None:
         """Write a timestamped message when its configured level is visible."""
         if not self.verbose and not essential:
             return
         timestamp = datetime.now().strftime("%H:%M:%S")
-        print(f"[{timestamp}] {message}", file=sys.stderr, flush=True)
+        line = f"[{timestamp}] {message}"
+        print(line, file=sys.stderr, flush=True)
+        if self._file is not None:
+            try:
+                print(line, file=self._file, flush=True)
+            except (OSError, ValueError) as exc:
+                self._disable_file_logging(exc)
+
+    def close(self) -> None:
+        """Close the optional application-run log file."""
+        if self._file is not None:
+            log_file = self._file
+            self._file = None
+            log_file.close()
 
     def exception(self, error: Exception) -> str:
         """Return safe exception detail for the active verbosity level."""
         if self.verbose:
             return str(error) or error.__class__.__name__
         return "error details hidden; run with --verbose to show the full exception"
+
+    def _remove_expired_logs(self, log_dir: Path) -> None:
+        """Remove application logs that reached the retention boundary."""
+        cutoff = datetime.now(timezone.utc).timestamp() - timedelta(
+            days=LOG_RETENTION_DAYS
+        ).total_seconds()
+        for path in log_dir.glob(f"{LOG_FILE_PREFIX}*.log"):
+            try:
+                if path.stat().st_mtime <= cutoff:
+                    path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                self.write(
+                    f"run log retention failed for {path.name}: {exc}",
+                    essential=True,
+                )
+
+    def _disable_file_logging(self, error: Exception) -> None:
+        """Keep stderr logging active after a run-file write failure."""
+        log_file = self._file
+        self._file = None
+        if log_file is not None:
+            try:
+                log_file.close()
+            except OSError:
+                pass
+        print(
+            f"TextTube run-file logging stopped: {error}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 class FileCachePaths:

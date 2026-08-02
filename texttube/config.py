@@ -20,6 +20,9 @@ MAX_AUDIO_TRANSCRIPTION_DURATION_SECONDS = 60 * 60
 MAX_SHORT_DURATION_SECONDS = 3 * 60
 DEFAULT_VIDEO_LIMIT = 100
 CACHE_DIR_NAME = "cache"
+LOG_DIR_NAME = "logs"
+LOG_FILE_PREFIX = "texttube-"
+LOG_RETENTION_DAYS = 30
 AUDIO_CACHE_EXTENSION = ".m4a"
 TRANSCRIPT_CACHE_EXTENSION = ".txt"
 SUBSCRIPTION_STATE_DIR_NAME = "state"
@@ -98,6 +101,10 @@ class RuntimePaths:
             / SUBSCRIPTION_STATE_DIR_NAME
             / GOOGLE_OAUTH_REFRESH_TOKEN_FILE
         )
+
+    def log_dir(self) -> Path:
+        """Return the managed application-run log directory."""
+        return self.state_root / "var" / LOG_DIR_NAME
 
 
 class ValueParser:

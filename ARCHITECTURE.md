@@ -78,7 +78,7 @@ The container entrypoint accepts these modes:
 
 In `serve` mode, authorization maintenance starts first. Scheduling starts after the first successful token validation, matching the former Compose health dependency. Both workers share shutdown state. If either worker exits unexpectedly, the supervisor stops the other and exits nonzero so the container restart policy can recover. Scheduler application runs remain isolated subprocesses, and signals are forwarded to an active subprocess.
 
-Application output, scheduler messages, and authorization instructions use only container stdout and stderr. The managed volume contains no log copy. Manual runs remain attached and are removed by the documented `--rm` workflow.
+Application output, scheduler messages, and authorization instructions remain visible on container stdout and stderr. Each scheduled or manual `app` invocation also writes its visible application output to a UTC-timestamped file in the managed volume. App startup removes run logs that are 30 days old or older. Manual runs remain attached and are removed by the documented `--rm` workflow without removing their volume-backed run logs.
 
 The managed paths are:
 
@@ -86,6 +86,7 @@ The managed paths are:
 - `/data/var/state/google_oauth_refresh_token` for the mode-`0600` Google refresh token
 - `/data/var/cache/<video_id>.txt` for optional transcript cache entries
 - `/data/var/cache/<video_id>.m4a` for optional audio cache entries
+- `/data/var/logs/texttube-<UTC timestamp>.log` for one application run
 - `/data/var/texttube.lock` for scheduled-run serialization
 
 Manual runs create or reuse cache entries only with `--cache`. Temporary uncached audio and chunks are deleted after each video.
@@ -114,7 +115,7 @@ Google credentials must use application type `TVs and Limited Input devices`. Au
 - `OpenAIAudioTranscriber` downloads fallback audio with `yt-dlp`, creates five-minute chunks with `ffmpeg`, and transcribes chunks sequentially with `gpt-transcribe`.
 - `OpenAISummarizer` uses the official OpenAI Python SDK and Responses API with `gpt-5.6-luna`. Summary requests use `store: false`.
 - `TelegramDelivery` formats HTML-safe messages, truncates them to Telegram limits, disables link previews, and sends run notices.
-- `FileSubscriptionState`, `FileCachePaths`, `ConsoleLog`, and `ApplicationLifecycle` adapt filesystem and process concerns.
+- `FileSubscriptionState`, `FileCachePaths`, `ConsoleLog`, and `ApplicationLifecycle` adapt filesystem and process concerns. `ConsoleLog` tees visible application output to stderr and one timestamped run file, pruning files at the 30-day retention boundary when an app run starts.
 - `AuthorizationService`, `CronScheduler`, and `StackService` provide authorization maintenance, isolated scheduling, and single-container supervision.
 
 ## Per-Video Flow

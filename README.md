@@ -96,13 +96,13 @@ Authorization, scheduler, and scheduled application output share the `texttube` 
 docker compose logs --follow --timestamps texttube
 ```
 
-Read logs retained for all existing Compose service containers:
+Each scheduled or manual application run also writes its visible output to a separate UTC-timestamped file under `/data/var/logs/`. A new app run removes these files when they are 30 days old or older. Inspect retained run logs from the managed volume:
 
 ```sh
-docker compose logs --timestamps
+docker compose exec texttube ls -l /data/var/logs
 ```
 
-Manual `app` and `auth` runs write directly to their attached terminal. The documented commands use `--rm`, so Docker removes each manual container and its logs when the command finishes. Docker’s configured logging driver retains persistent service output; the managed data volume never contains log files.
+Manual `app` and `auth` runs still write directly to their attached terminal. The documented `app --rm` workflow removes its one-off container while preserving the application run file in the managed volume. Authorization and scheduler-only messages remain standard-stream output and are available through Docker’s configured logging driver.
 
 ## Runtime Configuration
 
@@ -133,6 +133,7 @@ Compose persists credentials, state, and caches in the managed `texttube-data` v
 - `/data/var/state/google_oauth_refresh_token` stores the Google refresh token with owner-only permissions.
 - `/data/var/state/last_subscription_window_end_utc.txt` stores the completed subscription cutoff.
 - `/data/var/cache/` stores transcript and audio entries created by manual runs with `--cache`.
+- `/data/var/logs/` stores one timestamped file for each application run and retains it for less than 30 days.
 - `/data/var/texttube.lock` enforces singleton scheduled runs.
 
 Removing the OAuth token makes the service request approval again at its next validation; restarting `texttube` triggers that check immediately. Deleting the cutoff file resets the next subscription window to the previous 24 hours; the lock-safe maintenance command is documented in [AGENTS.md](AGENTS.md).

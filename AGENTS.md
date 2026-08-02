@@ -14,7 +14,7 @@
 - Keep the application small and avoid framework dependencies.
 - Keep API credentials in Compose environment variables and the Google refresh token only in the managed data volume.
 - Never print the Google refresh token or expose it through a Compose environment variable.
-- Send application output only to container stdout and stderr; do not duplicate logs on the managed data volume.
+- Keep application output on container stdout and stderr and tee each app run to a timestamped log in the managed data volume.
 - Use `OPENAI_API_KEY` for all model API calls.
 - Use the official OpenAI Python SDK for all OpenAI API calls.
 - Keep the transcript-summary prompt in `SUMMARIZER.md`.
