@@ -23,7 +23,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     """Validate configuration and run the cron scheduler."""
     parsed = list(arguments) if arguments is not None else sys.argv[1:]
     if parsed:
-        print("Usage: texttube_scheduler.py", file=sys.stderr)
+        print("Usage: python -m texttube.entrypoints.scheduler", file=sys.stderr)
         return INVALID_CONFIGURATION_EXIT_CODE
     try:
         scheduler = build_scheduler()
@@ -37,3 +37,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
     return scheduler.run()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

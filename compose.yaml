@@ -17,7 +17,7 @@ services:
       TEXTTUBE_VERBOSE: "${TEXTTUBE_VERBOSE:-}"
       TRANSCRIPT_LANGUAGES: "${TRANSCRIPT_LANGUAGES:-}"
     healthcheck:
-      test: [CMD, python, /app/texttube_service.py, healthcheck]
+      test: [CMD, python, -m, texttube.entrypoints.auth, --healthcheck]
       interval: 5s
       timeout: 5s
       retries: 3

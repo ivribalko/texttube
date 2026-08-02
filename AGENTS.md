@@ -8,7 +8,7 @@
 - Keep top-of-file source comments aligned with each file’s architectural role without restating detailed behavior.
 - Use one Docker Compose service for authorization maintenance, scheduled runs, and explicit manual commands.
 - Keep `compose.yaml` deployable by itself with the public image, environment variables, and a named data volume.
-- Keep scheduler implementation in `texttube/adapters/scheduler.py`, dependency construction in `texttube/entrypoints/scheduler.py`, and `texttube_scheduler.py` as a compatibility entrypoint.
+- Keep scheduler implementation in `texttube/adapters/scheduler.py` and dependency construction in `texttube/entrypoints/scheduler.py`.
 - Keep Compose pinned to the public `ghcr.io/ivribalko/texttube:latest` image.
 - Publish `linux/amd64` and `linux/arm64` images from pushes to `main` with `latest` and immutable commit tags.
 - Keep the application small and avoid framework dependencies.

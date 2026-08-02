@@ -13,7 +13,7 @@ from pathlib import Path
 from croniter import croniter
 
 LOCK_PATH = Path("/data/var/texttube.lock")
-APPLICATION_COMMAND = (sys.executable, "/app/texttube_app.py")
+APPLICATION_COMMAND = (sys.executable, "-m", "texttube.entrypoints.app")
 APPLICATION_WORKING_DIRECTORY = "/app"
 
 

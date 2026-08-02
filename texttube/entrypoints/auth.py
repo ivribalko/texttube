@@ -46,7 +46,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
     if parsed == ["--healthcheck"]:
         return healthcheck(RuntimePaths.discover().google_refresh_token_path())
     if parsed not in ([], ["--once"]):
-        print("Usage: texttube_auth.py [--healthcheck | --once]", file=sys.stderr)
+        print(
+            "Usage: python -m texttube.entrypoints.auth [--healthcheck | --once]",
+            file=sys.stderr,
+        )
         return 2
     try:
         service = build_service()
@@ -68,3 +71,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
         print(f"Google OAuth authorization failed: {exc}", file=sys.stderr)
         return 1
 
+
+if __name__ == "__main__":
+    raise SystemExit(main())

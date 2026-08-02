@@ -198,3 +198,7 @@ def _notify_run_failure(
         delivery.send_notice(message)
     except Exception:
         log.write("telegram run failure notification failed", essential=True)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

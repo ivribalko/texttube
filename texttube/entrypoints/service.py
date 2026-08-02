@@ -62,7 +62,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
 def _print_usage() -> None:
     """Print the unified container command interface."""
     print(
-        "Usage: texttube_service.py "
+        "Usage: python -m texttube.entrypoints.service "
         "[serve | app [OPTIONS] | auth [--once] | scheduler | healthcheck]",
         file=sys.stderr,
     )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

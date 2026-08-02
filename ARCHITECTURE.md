@@ -44,9 +44,7 @@ texttube/
 - `pipeline.py` contains readable application and per-video orchestration.
 - `config.py` owns constants, environment loading, normalized runtime options, value parsing, and runtime path discovery.
 - `adapters/` contains every OpenAI, YouTube, Google OAuth, Telegram, HTTP, filesystem, cron, and subprocess implementation.
-- `entrypoints/` parses process commands and constructs dependencies.
-- `texttube_app.py`, `texttube_auth.py`, and `texttube_scheduler.py` are thin compatibility entrypoints.
-- `texttube_service.py` dispatches the unified container modes.
+- `entrypoints/` contains the executable `app`, `auth`, `scheduler`, and `service` process surfaces. These modules parse commands, construct dependencies, and are launched with `python -m`.
 - `SUMMARIZER.md` defines transcript-summary input and output behavior.
 - `Dockerfile` builds the shared Linux image.
 - `compose.yaml` defines the single published-image service and managed volume.
@@ -73,8 +71,10 @@ The container entrypoint accepts these modes:
 - `serve` runs authorization maintenance and the cron scheduler under one supervisor. This is the Compose default.
 - `app` performs one manual subscription or selected-video run.
 - `auth --once` validates or replaces authorization and exits.
-- `scheduler` runs the scheduler alone for compatibility and diagnostics.
+- `scheduler` runs the scheduler alone for diagnostics.
 - `healthcheck` reports whether the stored refresh token was validated recently.
+
+The image starts `texttube.entrypoints.service` as a Python module. The scheduler launches `texttube.entrypoints.app` the same way, and the Compose healthcheck invokes `texttube.entrypoints.auth` directly. These package modules are the only process launch surfaces.
 
 In `serve` mode, authorization maintenance starts first. Scheduling starts after the first successful token validation, matching the former Compose health dependency. Both workers share shutdown state. If either worker exits unexpectedly, the supervisor stops the other and exits nonzero so the container restart policy can recover. Scheduler application runs remain isolated subprocesses, and signals are forwarded to an active subprocess.
 
