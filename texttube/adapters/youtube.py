@@ -8,13 +8,27 @@ from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from texttube.config import AppConfig, REQUEST_TIMEOUT_SECONDS, ValueParser
-from texttube.domain import FatalError, GoogleOAuthReauthorizationRequired, Video
+from texttube.domain import (
+    ChannelDiscoveryFailure,
+    FatalError,
+    GoogleOAuthReauthorizationRequired,
+    Video,
+)
 from texttube.ports import Log
 
 YOUTUBE_API_BASE_URL = "https://www.googleapis.com/youtube/v3"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_OAUTH_REAUTHORIZATION_ERROR_CODE = "invalid_grant"
 YOUTUBE_PAGE_SIZE = 50
+
+
+class HttpResponseError(FatalError):
+    """HTTP response failure with a status available for safe classification."""
+
+    def __init__(self, url: str, status_code: int, detail: str):
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(f"Request failed for {url}: HTTP {status_code}: {detail}")
 
 
 class HttpJsonClient:
@@ -43,9 +57,7 @@ class HttpJsonClient:
             raise FatalError(f"Request failed for {url}: {exc}") from exc
         if response.status_code != expected_status:
             detail = response.text[:500].replace("\n", " ")
-            raise FatalError(
-                f"Request failed for {url}: HTTP {response.status_code}: {detail}"
-            )
+            raise HttpResponseError(url, response.status_code, detail)
         try:
             parsed = response.json()
         except json.JSONDecodeError as exc:
@@ -120,7 +132,7 @@ class YouTubeDiscovery:
         self,
         window_start: datetime,
         window_end: datetime,
-    ) -> Iterator[Video]:
+    ) -> Iterator[Video | ChannelDiscoveryFailure]:
         """Yield deduplicated recent uploads from all current subscriptions."""
         seen_video_ids: set[str] = set()
         next_page_token: str | None = None
@@ -142,22 +154,41 @@ class YouTubeDiscovery:
             playlist_count += len(playlists)
             self.log.write(f"upload playlists so far: {playlist_count}")
             for channel_id, (playlist_id, channel_title) in playlists.items():
-                for video in self._iter_playlist_videos(
-                    playlist_id,
-                    channel_id,
-                    channel_title,
-                    window_start,
-                    window_end,
-                ):
-                    if video.video_id in seen_video_ids:
-                        continue
-                    seen_video_ids.add(video.video_id)
-                    yield video
+                try:
+                    for video in self._iter_playlist_videos(
+                        playlist_id,
+                        channel_id,
+                        channel_title,
+                        window_start,
+                        window_end,
+                    ):
+                        if video.video_id in seen_video_ids:
+                            continue
+                        seen_video_ids.add(video.video_id)
+                        yield video
+                except HttpResponseError as exc:
+                    if not self._is_unavailable_playlist_error(exc):
+                        raise
+                    yield ChannelDiscoveryFailure(
+                        channel_id=channel_id,
+                        channel_title=channel_title,
+                        detail=self.log.exception(exc),
+                    )
             next_page_token = str(page.get("nextPageToken", "")).strip() or None
             if not next_page_token:
                 self.log.write(f"subscriptions: {subscription_count}")
                 self.log.write(f"upload playlists: {playlist_count}")
                 return
+
+    @staticmethod
+    def _is_unavailable_playlist_error(error: HttpResponseError) -> bool:
+        """Return whether one channel playlist cannot be traversed."""
+        return (
+            error.status_code == 404 and "playlistNotFound" in error.detail
+        ) or (
+            error.status_code == 400
+            and "playlistOperationUnsupported" in error.detail
+        )
 
     def _iter_playlist_videos(
         self,

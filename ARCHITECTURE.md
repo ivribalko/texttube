@@ -113,7 +113,7 @@ Google credentials must use application type `TVs and Limited Input devices`. Au
 
 - `ApplicationPipeline` owns selected-video and subscription-window use cases, limit behavior, per-video isolation, and cutoff completion.
 - `VideoPipeline` owns short-video policy, the audio eligibility decision, summary fallback selection, and delivery.
-- `YouTubeDiscovery` refreshes Google authorization, traverses subscriptions and upload playlists, enriches metadata, deduplicates IDs, and enforces the subscription window.
+- `YouTubeDiscovery` refreshes Google authorization, traverses subscriptions and upload playlists, enriches metadata, deduplicates IDs, enforces the subscription window, and reports missing channel upload playlists as recoverable discovery failures.
 - `TranscriptResolver` uses cached transcripts first, native captions second, and permitted audio transcription last.
 - `NativeTranscriptFetcher` retrieves captions with `youtube-transcript-api`, promotes YouTube's default audio language when it is configured, and otherwise ranks configured languages in order.
 - `OpenAIAudioTranscriber` downloads fallback audio with `yt-dlp`, creates five-minute chunks with `ffmpeg`, and transcribes chunks sequentially with `gpt-transcribe`.
@@ -154,7 +154,7 @@ The summary model is `gpt-5.6-luna`. The audio transcription model is `gpt-trans
 
 A subscription run records its start time as the prospective window end. The previous completed cutoff is the window start; without a cutoff, the start defaults to 24 hours earlier.
 
-The cutoff is written only after subscription traversal completes. Fatal authentication, subscription, or run-level failures preserve the previous cutoff. Per-video fallbacks and failures do not abort traversal. Resetting the cutoff is an operator action performed while holding the scheduler lock.
+The cutoff is written only after subscription traversal completes. Fatal authentication, subscription, or run-level failures preserve the previous cutoff. Per-video fallbacks and failures do not abort traversal. A channel whose uploads playlist returns YouTube's `playlistNotFound` or `playlistOperationUnsupported` error is logged, announced through Telegram, and skipped without blocking cutoff completion. Resetting the cutoff is an operator action performed while holding the scheduler lock.
 
 The default message limit is 100. Probable Shorts do not count. Delivered transcript, description-fallback, and unavailable-summary messages count. Reaching the default cap sends a final limit notice.
 
@@ -170,6 +170,7 @@ The scheduler:
 ## Failure Behavior
 
 - Every individual HTTP request is attempted once. The OpenAI client uses `max_retries=0`; device authorization performs protocol-required polling.
+- YouTube `playlistNotFound` and `playlistOperationUnsupported` errors for an individual subscription channel produce a Telegram notice and allow remaining channels to continue.
 - Expected per-video failures use the description fallback or allow later videos to continue.
 - Fatal failures after Telegram construction trigger a run-level notice.
 - Google OAuth `invalid_grant` produces a reauthorization-specific notice and preserves the subscription window.

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from texttube.domain import (
+    ChannelDiscoveryFailure,
     DeliveryFailure,
     RunOutcome,
     Summary,
@@ -194,7 +195,11 @@ class ApplicationPipeline:
         sent_count = 0
         stopped_by_limit = False
         self.log.write("subscriptions mode: iterate recent videos", essential=True)
-        for video in self.discovery.iter_recent_videos(window_start, window_end):
+        for item in self.discovery.iter_recent_videos(window_start, window_end):
+            if isinstance(item, ChannelDiscoveryFailure):
+                self._report_channel_failure(item)
+                continue
+            video = item
             if limit > 0 and sent_count >= limit:
                 stopped_by_limit = True
                 break
@@ -233,3 +238,22 @@ class ApplicationPipeline:
             delivered_count=sent_count,
             stopped_by_limit=stopped_by_limit,
         )
+
+    def _report_channel_failure(self, failure: ChannelDiscoveryFailure) -> None:
+        """Log and notify about one skipped subscription channel."""
+        self.log.write(
+            f"channel {failure.channel_title}: uploads unavailable: {failure.detail}",
+            essential=True,
+        )
+        try:
+            self.delivery.send_notice(
+                f'TextTube skipped channel "{failure.channel_title}" because YouTube '
+                "could not read its uploads playlist. The run will continue.\n\n"
+                f"https://www.youtube.com/channel/{failure.channel_id}"
+            )
+        except DeliveryFailure as exc:
+            self.log.write(
+                f"channel {failure.channel_title}: telegram notice failed: "
+                f"{self.log.exception(exc)}",
+                essential=True,
+            )

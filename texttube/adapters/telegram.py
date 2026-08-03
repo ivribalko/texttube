@@ -52,7 +52,7 @@ class TelegramDelivery:
 
     def send_notice(self, message: str) -> None:
         """Send one plain run-level notice."""
-        self._send_message(message)
+        self._send_message(html.escape(message))
 
     def _send_message(self, text: str) -> None:
         """Send one message through Telegram's Bot API."""

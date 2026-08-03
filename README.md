@@ -147,6 +147,7 @@ The model names are application constants rather than operator settings:
 - Videos with unknown duration or a duration longer than 60 minutes may use native captions but never download or transcribe audio.
 - A failed transcript path falls back to a title-guided summary of the cleaned video description.
 - If the description summary also fails, TextTube sends `Summary unavailable.`.
+- A subscribed channel with a missing or unsupported YouTube uploads playlist is logged, announced through Telegram, and skipped while the run continues.
 - The subscription cutoff advances after the run finishes, including runs where individual videos use fallbacks.
 - Scheduled runs never overlap.
 

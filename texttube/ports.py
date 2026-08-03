@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Protocol
 
-from texttube.domain import Summary, Transcript, Video
+from texttube.domain import ChannelDiscoveryFailure, Summary, Transcript, Video
 
 
 class VideoDiscovery(Protocol):
@@ -20,7 +20,7 @@ class VideoDiscovery(Protocol):
         self,
         window_start: datetime,
         window_end: datetime,
-    ) -> Iterable[Video]: ...
+    ) -> Iterable[Video | ChannelDiscoveryFailure]: ...
 
 
 class Transcription(Protocol):

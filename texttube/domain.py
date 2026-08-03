@@ -23,6 +23,15 @@ class DeliveryFailure(Exception):
     """Delivery failure for one outbound message."""
 
 
+@dataclass(frozen=True)
+class ChannelDiscoveryFailure:
+    """Recoverable failure while reading one subscribed channel."""
+
+    channel_id: str
+    channel_title: str
+    detail: str
+
+
 class SummarySource(Enum):
     """Identifies the source used to create a delivered summary."""
 
