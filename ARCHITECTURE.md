@@ -6,7 +6,7 @@ This document is canonical for structure, dependency direction, data flow, state
 
 ## Design Constraints
 
-- All language and audio inference runs through OpenAI.
+- All active language inference runs through OpenAI. The retained audio-transcription implementation is disabled.
 - The application remains a small Python package without an application framework.
 - Business orchestration has no SDK, HTTP, filesystem, or subprocess knowledge.
 - Python installation, execution, and validation stay inside Docker.
@@ -85,13 +85,14 @@ Verbose application logging records the summary source, language hint, input and
 The managed paths are:
 
 - `/data/var/state/last_subscription_window_end_utc.txt` for the last completed subscription cutoff
+- `/data/var/state/pending_video_failures.json` for failed-video attempt counts and terminal notifications
 - `/data/var/state/google_oauth_refresh_token` for the mode-`0600` Google refresh token
 - `/data/var/cache/<video_id>.txt` for optional transcript cache entries
-- `/data/var/cache/<video_id>.m4a` for optional audio cache entries
+- `/data/var/cache/<video_id>.m4a` for retained, inactive audio cache entries
 - `/data/var/logs/texttube-<UTC timestamp>.log` for one application run
 - `/data/var/texttube.lock` for scheduled-run serialization
 
-Manual runs create or reuse cache entries only with `--cache`. Temporary uncached audio and chunks are deleted after each video.
+Manual runs create or reuse transcript cache entries only with `--cache`. The retained audio cache and temporary-audio implementation are not reached.
 
 ## Configuration and Authentication
 
@@ -111,15 +112,15 @@ Google credentials must use application type `TVs and Limited Input devices`. Au
 
 ## Application Components
 
-- `ApplicationPipeline` owns selected-video and subscription-window use cases, limit behavior, per-video isolation, and cutoff completion.
-- `VideoPipeline` owns short-video policy, the audio eligibility decision, summary fallback selection, and delivery.
+- `ApplicationPipeline` owns selected-video and subscription-window use cases, limit behavior, durable failed-video attempts, per-video isolation, and cutoff completion.
+- `VideoPipeline` owns short-video policy, summary fallback selection, terminal unavailable-message formatting, and delivery.
 - `YouTubeDiscovery` refreshes Google authorization, traverses subscriptions and upload playlists, enriches metadata, deduplicates IDs, enforces the subscription window, and reports missing channel upload playlists as recoverable discovery failures.
-- `TranscriptResolver` uses cached transcripts first, native captions second, and permitted audio transcription last.
+- `TranscriptResolver` uses cached transcripts first and native captions second. Its audio fallback remains implemented but receives an unconditional disabled decision from the core.
 - `NativeTranscriptFetcher` retrieves captions with `youtube-transcript-api`, promotes YouTube's default audio language when it is configured, and otherwise ranks configured languages in order.
-- `OpenAIAudioTranscriber` downloads fallback audio with `yt-dlp`, creates five-minute chunks with `ffmpeg`, and transcribes chunks sequentially with `gpt-transcribe`.
+- `OpenAIAudioTranscriber` retains the former `yt-dlp`, `ffmpeg`, and `gpt-transcribe` implementation but is not invoked.
 - `OpenAISummarizer` uses the official OpenAI Python SDK and Responses API with `gpt-5.6-luna`. Summary requests use `store: false`.
 - `TelegramDelivery` formats HTML-safe messages, truncates them to Telegram limits, disables link previews, and sends run notices.
-- `FileSubscriptionState`, `FileCachePaths`, `ConsoleLog`, and `ApplicationLifecycle` adapt filesystem and process concerns. `ConsoleLog` tees visible application output to stderr and one timestamped run file, pruning files at the 30-day retention boundary when an app run starts.
+- `FileSubscriptionState`, `FileCachePaths`, `ConsoleLog`, and `ApplicationLifecycle` adapt filesystem and process concerns. Failed-video state is atomically replaced after each change. `ConsoleLog` tees visible application output to stderr and one timestamped run file, pruning files at the 30-day retention boundary when an app run starts.
 - `AuthorizationService`, `CronScheduler`, and `StackService` provide authorization maintenance, isolated scheduling, and single-container supervision.
 
 ## Per-Video Flow
@@ -127,19 +128,21 @@ Google credentials must use application type `TVs and Limited Input devices`. Au
 - Videos with a known duration of three minutes or less are probable Shorts and are skipped.
 - A cached transcript is used first when manual cache reuse is enabled.
 - Native captions are attempted next. YouTube's default audio language is first when it belongs to `TRANSCRIPT_LANGUAGES`; otherwise configured order is preserved. Every other available language follows.
-- Any nonempty native transcript is summarized and translated when needed before audio fallback is considered.
-- Only when every native caption fails and the video has a known duration no longer than 60 minutes is audio downloaded, chunked, and transcribed.
-- If native captions fail and the duration is unknown or longer than 60 minutes, audio is never downloaded or transcribed.
+- Any nonempty native transcript is summarized and translated when needed.
+- Audio is never downloaded or transcribed, regardless of video duration.
 - The resolved transcript is summarized with the transcript prompt.
-- Transcript retrieval, transcription, or transcript-summary failure switches to a title-guided summary of the cleaned description.
-- If description summarization also fails, the message body is `Summary unavailable.`.
-- The final body is delivered with channel, title, and YouTube link.
-
-Exactly 60 minutes remains eligible for audio transcription. Exclusion applies when duration is unknown or above 60 minutes.
+- Transcript retrieval or transcript-summary failure switches to a title-guided summary of the cleaned description.
+- If description summarization also fails, the video ID is retained for a later application run instead of sending a message immediately.
+- Telegram delivery failure retains the same video ID for a later application run.
+- Each video receives at most one full processing attempt per application run.
+- After the third failed processing attempt, TextTube stops summarizing that video and sends a terminal message whose body is exactly `summary unavailable`.
+- A failed terminal Telegram delivery remains pending only for delivery; later runs do not summarize the video again.
+- Successful ordinary or terminal delivery removes the video ID from pending state.
+- Every delivered body includes the channel, title, and YouTube link.
 
 ## Summary Rules
 
-`SUMMARIZER.md` contains required top-level transcript and description prompt sections. Startup validates and separates them before constructing the summarizer. TextTube passes YouTube's selected caption language code or default audio language code when known, plus the `TRANSCRIPT_LANGUAGES` preferences, only to the transcript contract. A transcript already in a preferred language is summarized in that language. For a transcript outside the preferred languages, including cached or audio text without language metadata, the model chooses the most appropriate preferred language and translates the summary into it. Without preferences, a known source language remains the summary language and unknown-language text uses its dominant language.
+`SUMMARIZER.md` contains required top-level transcript and description prompt sections. Startup validates and separates them before constructing the summarizer. TextTube passes YouTube's selected caption language code or default audio language code when known, plus the `TRANSCRIPT_LANGUAGES` preferences, only to the transcript contract. A transcript already in a preferred language is summarized in that language. For a transcript outside the preferred languages, including cached text without language metadata, the model chooses the most appropriate preferred language and translates the summary into it. Without preferences, a known source language remains the summary language and unknown-language text uses its dominant language.
 
 The description fallback contract is the second section of `SUMMARIZER.md`:
 
@@ -148,15 +151,15 @@ The description fallback contract is the second section of `SUMMARIZER.md`:
 - Links, domains, social handles, promotions, affiliate text, calls to action, contacts, and channel boilerplate are removed.
 - Output is a compact plain-text paragraph.
 
-The summary model is `gpt-5.6-luna`. The audio transcription model is `gpt-transcribe`. Neither is runtime-configurable.
+The summary model is `gpt-5.6-luna`. The retained audio transcription model is `gpt-transcribe`. Neither is runtime-configurable, and audio transcription is disabled.
 
 ## Subscription State and Scheduling
 
 A subscription run records its start time as the prospective window end. The previous completed cutoff is the window start; without a cutoff, the start defaults to 24 hours earlier.
 
-The cutoff is written only after subscription traversal completes. Fatal authentication, subscription, or run-level failures preserve the previous cutoff. Per-video fallbacks and failures do not abort traversal. A channel whose uploads playlist returns YouTube's `playlistNotFound` or `playlistOperationUnsupported` error is logged, announced through Telegram, and skipped without blocking cutoff completion. Resetting the cutoff is an operator action performed while holding the scheduler lock.
+The cutoff is written only after subscription traversal completes. Fatal authentication, subscription, or run-level failures preserve the previous cutoff. Per-video fallbacks and failures do not abort traversal. Failed video IDs survive cutoff advancement in separate pending state. Subscription runs retry terminal notifications and failed videos before current-window discovery, and current-window discovery skips IDs already attempted in that run. Explicit `--video` runs update retry state only for the selected ID. A channel whose uploads playlist returns YouTube's `playlistNotFound` or `playlistOperationUnsupported` error is logged, announced through Telegram, and skipped without blocking cutoff completion. Resetting the cutoff is an operator action performed while holding the scheduler lock.
 
-The default message limit is 100. Probable Shorts do not count. Delivered transcript, description-fallback, and unavailable-summary messages count. Reaching the default cap sends a final limit notice.
+The default message limit is 100. Probable Shorts do not count. Delivered transcript, description-fallback, and terminal unavailable messages count. Reaching the default cap sends a final limit notice.
 
 The scheduler:
 
@@ -169,9 +172,9 @@ The scheduler:
 
 ## Failure Behavior
 
-- Every individual HTTP request is attempted once. The OpenAI client uses `max_retries=0`; device authorization performs protocol-required polling.
+- Every individual HTTP request is attempted once. The OpenAI client uses `max_retries=0`; device authorization performs protocol-required polling. Durable video retries occur once per later application run rather than inside a request.
 - YouTube `playlistNotFound` and `playlistOperationUnsupported` errors for an individual subscription channel produce a Telegram notice and allow remaining channels to continue.
-- Expected per-video failures use the description fallback or allow later videos to continue.
+- Expected per-video failures use the description fallback, persist the video ID when no message is delivered, and allow later videos to continue.
 - Fatal failures after Telegram construction trigger a run-level notice.
 - Google OAuth `invalid_grant` produces a reauthorization-specific notice and preserves the subscription window.
 - Error details are hidden unless verbose logging is enabled.
@@ -183,10 +186,9 @@ The scheduler:
 
 - Python standard library modules handle CLI parsing, immutable values, files, subprocesses, signals, threads, and state.
 - `requests` handles Google OAuth, YouTube Data API, and Telegram requests.
-- `openai` is the official client for Responses API summaries and audio transcription.
+- `openai` is the official client for Responses API summaries and the retained audio-transcription implementation.
 - `croniter` validates expressions and calculates occurrences using Python's IANA timezone data.
 - `youtube-transcript-api` retrieves native captions.
-- `yt-dlp`, its EJS challenge solver, and Deno download eligible fallback audio.
-- `ffmpeg` extracts and chunks audio in the container.
+- `yt-dlp`, its EJS challenge solver, Deno, and `ffmpeg` remain installed for the dormant audio-transcription implementation.
 - Python `fcntl` and util-linux `flock` coordinate scheduled runs and maintenance.
 - GitHub Actions and GitHub Container Registry build and distribute the public runtime image.

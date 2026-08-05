@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import signal
 import sys
 from datetime import datetime, timedelta, timezone
@@ -14,12 +16,14 @@ from texttube.config import (
     LAST_SUBSCRIPTION_WINDOW_END_FILE,
     LOG_FILE_PREFIX,
     LOG_RETENTION_DAYS,
+    MAX_VIDEO_PROCESSING_ATTEMPTS,
+    PENDING_VIDEO_FAILURES_FILE,
     SUBSCRIPTION_STATE_DIR_NAME,
     TRANSCRIPT_CACHE_EXTENSION,
     RuntimePaths,
     ValueParser,
 )
-from texttube.domain import FatalError
+from texttube.domain import FatalError, PendingVideoFailure
 
 
 class ConsoleLog:
@@ -126,7 +130,7 @@ class FileCachePaths:
 
 
 class FileSubscriptionState:
-    """Persists the last completed subscription-window boundary."""
+    """Persists subscription boundaries and failed-video retry state."""
 
     def __init__(self, state_root: Path):
         self.state_root = state_root
@@ -140,6 +144,11 @@ class FileSubscriptionState:
     def cutoff_path(self) -> Path:
         """Return the completed-window cutoff path."""
         return self.state_dir / LAST_SUBSCRIPTION_WINDOW_END_FILE
+
+    @property
+    def pending_path(self) -> Path:
+        """Return the durable failed-video retry-state path."""
+        return self.state_dir / PENDING_VIDEO_FAILURES_FILE
 
     def subscription_window(self) -> tuple[datetime, datetime]:
         """Resolve the next half-open subscription window in UTC."""
@@ -173,6 +182,119 @@ class FileSubscriptionState:
             window_end.astimezone(timezone.utc).replace(microsecond=0).isoformat(),
             encoding="utf-8",
         )
+
+    def pending_video_failures(self) -> tuple[PendingVideoFailure, ...]:
+        """Return videos that remain below the processing-attempt limit."""
+        pending, _ = self._read_pending_state()
+        return tuple(
+            PendingVideoFailure(video_id=video_id, failed_attempts=attempts)
+            for video_id, attempts in sorted(pending.items())
+        )
+
+    def pending_unavailable_notices(self) -> tuple[str, ...]:
+        """Return videos awaiting only their terminal unavailable notice."""
+        _, unavailable = self._read_pending_state()
+        return tuple(sorted(unavailable))
+
+    def record_video_failure(self, video_id: str) -> int:
+        """Record one failed run and move attempt three to terminal delivery."""
+        pending, unavailable = self._read_pending_state()
+        if video_id in unavailable:
+            return MAX_VIDEO_PROCESSING_ATTEMPTS
+        attempts = pending.get(video_id, 0) + 1
+        if attempts >= MAX_VIDEO_PROCESSING_ATTEMPTS:
+            pending.pop(video_id, None)
+            unavailable.add(video_id)
+        else:
+            pending[video_id] = attempts
+        self._write_pending_state(pending, unavailable)
+        return attempts
+
+    def complete_video(self, video_id: str) -> None:
+        """Remove a successfully handled video from every pending collection."""
+        pending, unavailable = self._read_pending_state()
+        changed = pending.pop(video_id, None) is not None
+        if video_id in unavailable:
+            unavailable.remove(video_id)
+            changed = True
+        if changed:
+            self._write_pending_state(pending, unavailable)
+
+    def _read_pending_state(self) -> tuple[dict[str, int], set[str]]:
+        """Read and validate the durable failed-video state document."""
+        if not self.pending_path.exists():
+            return {}, set()
+        try:
+            raw = json.loads(self.pending_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise FatalError(
+                f"Invalid pending video state file {self.pending_path}: {exc}"
+            ) from exc
+        if not isinstance(raw, dict):
+            raise FatalError(
+                f"Invalid pending video state file {self.pending_path}: expected object"
+            )
+        raw_pending = raw.get("pending", {})
+        raw_unavailable = raw.get("summary_unavailable", [])
+        if not isinstance(raw_pending, dict) or not isinstance(raw_unavailable, list):
+            raise FatalError(
+                f"Invalid pending video state file {self.pending_path}: invalid collections"
+            )
+        pending: dict[str, int] = {}
+        for video_id, attempts in raw_pending.items():
+            if (
+                not isinstance(video_id, str)
+                or not video_id
+                or isinstance(attempts, bool)
+                or not isinstance(attempts, int)
+                or attempts < 1
+                or attempts >= MAX_VIDEO_PROCESSING_ATTEMPTS
+            ):
+                raise FatalError(
+                    f"Invalid pending video state file {self.pending_path}: "
+                    "invalid pending entry"
+                )
+            pending[video_id] = attempts
+        unavailable: set[str] = set()
+        for video_id in raw_unavailable:
+            if not isinstance(video_id, str) or not video_id:
+                raise FatalError(
+                    f"Invalid pending video state file {self.pending_path}: "
+                    "invalid summary-unavailable entry"
+                )
+            unavailable.add(video_id)
+        if set(pending).intersection(unavailable):
+            raise FatalError(
+                f"Invalid pending video state file {self.pending_path}: duplicate video state"
+            )
+        return pending, unavailable
+
+    def _write_pending_state(
+        self,
+        pending: dict[str, int],
+        unavailable: set[str],
+    ) -> None:
+        """Atomically replace the durable failed-video state document."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        document = {
+            "pending": dict(sorted(pending.items())),
+            "summary_unavailable": sorted(unavailable),
+        }
+        temporary_path = self.pending_path.with_name(
+            f".{self.pending_path.name}.{os.getpid()}.tmp"
+        )
+        try:
+            temporary_path.write_text(
+                f"{json.dumps(document, indent=2)}\n",
+                encoding="utf-8",
+            )
+            temporary_path.replace(self.pending_path)
+        except OSError as exc:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise FatalError(f"Could not save pending video state: {exc}") from exc
 
 
 class ApplicationLifecycle:

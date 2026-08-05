@@ -6,7 +6,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Protocol
 
-from texttube.domain import ChannelDiscoveryFailure, Summary, Transcript, Video
+from texttube.domain import (
+    ChannelDiscoveryFailure,
+    PendingVideoFailure,
+    Summary,
+    Transcript,
+    Video,
+)
 
 
 class VideoDiscovery(Protocol):
@@ -64,11 +70,19 @@ class Delivery(Protocol):
 
 
 class State(Protocol):
-    """Reads and advances the completed subscription window."""
+    """Persists subscription progress and failed-video retry state."""
 
     def subscription_window(self) -> tuple[datetime, datetime]: ...
 
     def complete_window(self, window_end: datetime) -> None: ...
+
+    def pending_video_failures(self) -> tuple[PendingVideoFailure, ...]: ...
+
+    def pending_unavailable_notices(self) -> tuple[str, ...]: ...
+
+    def record_video_failure(self, video_id: str) -> int: ...
+
+    def complete_video(self, video_id: str) -> None: ...
 
 
 class CachePaths(Protocol):

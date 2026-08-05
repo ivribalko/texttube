@@ -134,19 +134,20 @@ Compose supplies application values through the process environment. Command-lin
 
 `CRON` is required by the default `serve` mode but is ignored by manual application and authorization commands. It must be a standard five-field cron expression; shortcuts such as `@daily` are not accepted. `TZ` selects the IANA timezone used to evaluate the expression and defaults to `UTC`. Set `TZ=<IANA_TIMEZONE>` to schedule in the chosen timezone and follow any daylight-saving transitions defined for it. Visible application log timestamps also follow the container timezone, while subscription state and run-log filenames remain in UTC.
 
-`TRANSCRIPT_LANGUAGES` is an ordered, comma-separated list. When YouTube's default audio language belongs to that list, its native captions are attempted first; otherwise configured order is preserved. Captions in every other available language follow. YouTube's caption or default-audio language code is passed to transcript summarization when available. A transcript already in one of the configured languages is summarized in the same language; for any other transcript language, the model chooses the most appropriate configured language and translates the summary into it. Audio is downloaded and transcribed only when every available native caption fails.
+`TRANSCRIPT_LANGUAGES` is an ordered, comma-separated list. When YouTube's default audio language belongs to that list, its native captions are attempted first; otherwise configured order is preserved. Captions in every other available language follow. YouTube's caption or default-audio language code is passed to transcript summarization when available. A transcript already in one of the configured languages is summarized in the same language; for any other transcript language, the model chooses the most appropriate configured language and translates the summary into it. Audio transcription is disabled.
 
 The model names are application constants rather than operator settings:
 
 - `gpt-5.6-luna` generates transcript and description summaries.
-- `gpt-transcribe` transcribes fallback audio.
+- `gpt-transcribe` remains in the dormant audio-transcription implementation and is not invoked.
 
 ## Important Processing Boundaries
 
 - Videos up to three minutes long are treated as probable Shorts and skipped.
-- Videos with unknown duration or a duration longer than 60 minutes may use native captions but never download or transcribe audio.
+- Videos of every duration may use native captions but never download or transcribe audio.
 - A failed transcript path falls back to a title-guided summary of the cleaned video description.
-- If the description summary also fails, TextTube sends `Summary unavailable.`.
+- If TextTube cannot summarize a video or deliver its Telegram message, it retains the video ID and retries once per later application run until the video reaches three total attempts.
+- After three failed processing attempts, TextTube stops summarizing that video and sends `summary unavailable`. A failed terminal delivery is retried without further summarization.
 - A subscribed channel with a missing or unsupported YouTube uploads playlist is logged, announced through Telegram, and skipped while the run continues.
 - The subscription cutoff advances after the run finishes, including runs where individual videos use fallbacks.
 - Scheduled runs never overlap.
@@ -159,7 +160,8 @@ Compose persists credentials, state, and caches in the managed `texttube-data` v
 
 - `/data/var/state/google_oauth_refresh_token` stores the Google refresh token with owner-only permissions.
 - `/data/var/state/last_subscription_window_end_utc.txt` stores the completed subscription cutoff.
-- `/data/var/cache/` stores transcript and audio entries created by manual runs with `--cache`.
+- `/data/var/state/pending_video_failures.json` stores failed-video attempt counts and terminal notifications.
+- `/data/var/cache/` stores transcript entries created by manual runs with `--cache`; retained audio cache code is inactive.
 - `/data/var/logs/` stores one timestamped file for each application run and retains it for less than 30 days.
 - `/data/var/texttube.lock` enforces singleton scheduled runs.
 

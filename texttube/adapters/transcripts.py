@@ -200,7 +200,7 @@ class NativeTranscriptFetcher:
         raise VideoFailure("transcript unavailable: transcript was empty")
 
 class TranscriptResolver:
-    """Resolves cached, native-caption, or permitted audio transcripts."""
+    """Resolves cached or native-caption transcripts with dormant audio code."""
 
     def __init__(
         self,
@@ -241,14 +241,9 @@ class TranscriptResolver:
         except VideoFailure as transcript_exc:
             self.log.write(f"transcript fallback {video.video_id}: {transcript_exc}")
             if not allow_audio:
-                ineligible_reason = (
-                    "video duration is unknown"
-                    if video.duration_seconds is None
-                    else "video exceeds 60 minutes"
-                )
                 raise VideoFailure(
                     f"{transcript_exc}; audio transcription skipped because "
-                    f"{ineligible_reason}"
+                    "it is disabled"
                 ) from transcript_exc
             try:
                 result = self.audio.fetch(

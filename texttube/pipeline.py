@@ -25,7 +25,7 @@ from texttube.ports import (
     VideoDiscovery,
 )
 
-SUMMARY_UNAVAILABLE_MESSAGE = "Summary unavailable."
+SUMMARY_UNAVAILABLE_MESSAGE = "summary unavailable"
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,7 @@ class ProcessingPolicy:
     max_short_duration_seconds: int
     max_audio_duration_seconds: int
     default_video_limit: int
+    max_video_processing_attempts: int
 
 
 class VideoPipeline:
@@ -64,11 +65,8 @@ class VideoPipeline:
         )
 
     def is_audio_allowed(self, video: Video) -> bool:
-        """Return whether audio fallback is permitted for the known duration."""
-        return (
-            video.duration_seconds is not None
-            and video.duration_seconds <= self.policy.max_audio_duration_seconds
-        )
+        """Keep the retained audio-transcription path disabled."""
+        return False
 
     def process(self, video: Video) -> VideoOutcome:
         """Process one video through the complete core use case."""
@@ -81,14 +79,28 @@ class VideoPipeline:
             essential=True,
         )
         summary = self._summarize(video)
+        return self._deliver(video, summary)
+
+    def deliver_unavailable(self, video: Video) -> VideoOutcome:
+        """Deliver the terminal message after processing attempts are exhausted."""
+        return self._deliver(
+            video,
+            Summary(
+                text=SUMMARY_UNAVAILABLE_MESSAGE,
+                source=SummarySource.UNAVAILABLE,
+            ),
+        )
+
+    def _deliver(self, video: Video, summary: Summary) -> VideoOutcome:
+        """Deliver one prepared summary and return its successful outcome."""
         self.log.write(f"process {video.video_id}: format message")
         self.log.write(f"process {video.video_id}: send telegram", essential=True)
         self.delivery.deliver(video, summary)
-        result_label = (
-            "summarized"
-            if summary.source is SummarySource.TRANSCRIPT
-            else "description fallback"
-        )
+        result_label = {
+            SummarySource.TRANSCRIPT: "summarized",
+            SummarySource.DESCRIPTION: "description fallback",
+            SummarySource.UNAVAILABLE: "summary unavailable",
+        }[summary.source]
         self.log.write(f"sent {video.video_id}: {result_label}")
         return VideoOutcome(
             video_id=video.video_id,
@@ -102,7 +114,7 @@ class VideoPipeline:
             transcript = self.transcription.fetch(
                 video,
                 allow_audio=self.is_audio_allowed(video),
-                audio_cache_path=self.cache_paths.audio(video.video_id),
+                audio_cache_path=None,
                 transcript_cache_path=self.cache_paths.transcript(video.video_id),
             )
             self.log.write(
@@ -143,10 +155,14 @@ class VideoPipeline:
                 f"{self.log.exception(exc)}",
                 essential=True,
             )
-            return Summary(
-                text=SUMMARY_UNAVAILABLE_MESSAGE,
-                source=SummarySource.UNAVAILABLE,
+            raise VideoFailure(SUMMARY_UNAVAILABLE_MESSAGE) from exc
+        except Exception as exc:
+            self.log.write(
+                f"process {video.video_id}: unexpected description summary error: "
+                f"{self.log.exception(exc)}",
+                essential=True,
             )
+            raise VideoFailure(SUMMARY_UNAVAILABLE_MESSAGE) from exc
 
 
 class ApplicationPipeline:
@@ -173,12 +189,12 @@ class ApplicationPipeline:
         self.log.write(f"single video mode: {video_id}", essential=True)
         self.log.write("startup: resolve youtube token", essential=True)
         video = self.discovery.fetch_video(video_id)
-        try:
-            outcome = self.videos.process(video)
-            delivered_count = int(outcome.delivered)
-        except (VideoFailure, DeliveryFailure) as exc:
-            self.log.write(f"failed to send {video.video_id}: {exc}", essential=True)
-            delivered_count = 0
+        outcome = (
+            self._deliver_pending_unavailable(video)
+            if video_id in self.state.pending_unavailable_notices()
+            else self._attempt_video(video)
+        )
+        delivered_count = int(outcome is not None and outcome.delivered)
         self.log.write(f"sent messages: {delivered_count}", essential=True)
         return RunOutcome(delivered_count=delivered_count)
 
@@ -192,32 +208,35 @@ class ApplicationPipeline:
             essential=True,
         )
 
-        sent_count = 0
-        stopped_by_limit = False
+        sent_count, attempted_video_ids, stopped_by_limit = self._retry_pending_videos(
+            limit
+        )
         self.log.write("subscriptions mode: iterate recent videos", essential=True)
-        for item in self.discovery.iter_recent_videos(window_start, window_end):
+        items = (
+            ()
+            if stopped_by_limit
+            else self.discovery.iter_recent_videos(window_start, window_end)
+        )
+        for item in items:
             if isinstance(item, ChannelDiscoveryFailure):
                 self._report_channel_failure(item)
                 continue
             video = item
+            if video.video_id in attempted_video_ids:
+                self.log.write(
+                    f"skip {video.video_id}: already attempted this run"
+                )
+                continue
             if limit > 0 and sent_count >= limit:
                 stopped_by_limit = True
                 break
-            try:
-                outcome = self.videos.process(video)
-                if outcome.delivered:
-                    sent_count += 1
-                    if limit > 0 and sent_count >= limit:
-                        stopped_by_limit = True
-                        break
-            except (VideoFailure, DeliveryFailure) as exc:
-                self.log.write(f"failed to send {video.video_id}: {exc}", essential=True)
-            except Exception as exc:
-                self.log.write(
-                    f"failed to process {video.video_id}: unexpected error: "
-                    f"{self.log.exception(exc)}",
-                    essential=True,
-                )
+            attempted_video_ids.add(video.video_id)
+            outcome = self._attempt_video(video)
+            if outcome is not None and outcome.delivered:
+                sent_count += 1
+                if limit > 0 and sent_count >= limit:
+                    stopped_by_limit = True
+                    break
 
         if (
             stopped_by_limit
@@ -238,6 +257,95 @@ class ApplicationPipeline:
             delivered_count=sent_count,
             stopped_by_limit=stopped_by_limit,
         )
+
+    def _retry_pending_videos(
+        self,
+        limit: int,
+    ) -> tuple[int, set[str], bool]:
+        """Attempt terminal notices and failed videos once at the start of a run."""
+        sent_count = 0
+        attempted_video_ids: set[str] = set()
+        unavailable_ids = self.state.pending_unavailable_notices()
+        pending_failures = self.state.pending_video_failures()
+        retry_items = [
+            (video_id, True) for video_id in unavailable_ids
+        ] + [
+            (failure.video_id, False) for failure in pending_failures
+        ]
+        if retry_items:
+            self.log.write(
+                f"pending videos: retry {len(retry_items)}",
+                essential=True,
+            )
+        for video_id, unavailable_only in retry_items:
+            if limit > 0 and sent_count >= limit:
+                return sent_count, attempted_video_ids, True
+            attempted_video_ids.add(video_id)
+            video = self.discovery.fetch_video(video_id)
+            outcome = (
+                self._deliver_pending_unavailable(video)
+                if unavailable_only
+                else self._attempt_video(video)
+            )
+            if outcome is not None and outcome.delivered:
+                sent_count += 1
+        return sent_count, attempted_video_ids, False
+
+    def _attempt_video(self, video: Video) -> VideoOutcome | None:
+        """Process one video and persist success or one failed run."""
+        try:
+            outcome = self.videos.process(video)
+        except (VideoFailure, DeliveryFailure) as exc:
+            self.log.write(
+                f"failed to process {video.video_id}: {self.log.exception(exc)}",
+                essential=True,
+            )
+            return self._record_video_failure(video)
+        except Exception as exc:
+            self.log.write(
+                f"failed to process {video.video_id}: unexpected error: "
+                f"{self.log.exception(exc)}",
+                essential=True,
+            )
+            return self._record_video_failure(video)
+        self.state.complete_video(video.video_id)
+        return outcome
+
+    def _record_video_failure(self, video: Video) -> VideoOutcome | None:
+        """Record a failed run and deliver the terminal message on attempt three."""
+        attempts = self.state.record_video_failure(video.video_id)
+        self.log.write(
+            f"pending {video.video_id}: failed attempt {attempts}",
+            essential=True,
+        )
+        if attempts < self.policy.max_video_processing_attempts:
+            return None
+        return self._deliver_pending_unavailable(video)
+
+    def _deliver_pending_unavailable(self, video: Video) -> VideoOutcome | None:
+        """Deliver a terminal unavailable message without retrying summarization."""
+        self.log.write(
+            f"pending {video.video_id}: send summary unavailable",
+            essential=True,
+        )
+        try:
+            outcome = self.videos.deliver_unavailable(video)
+        except DeliveryFailure as exc:
+            self.log.write(
+                f"pending {video.video_id}: summary unavailable delivery failed: "
+                f"{self.log.exception(exc)}",
+                essential=True,
+            )
+            return None
+        except Exception as exc:
+            self.log.write(
+                f"pending {video.video_id}: unexpected summary unavailable error: "
+                f"{self.log.exception(exc)}",
+                essential=True,
+            )
+            return None
+        self.state.complete_video(video.video_id)
+        return outcome
 
     def _report_channel_failure(self, failure: ChannelDiscoveryFailure) -> None:
         """Log and notify about one skipped subscription channel."""

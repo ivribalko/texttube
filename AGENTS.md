@@ -20,9 +20,8 @@
 - Keep the transcript and description summary prompts in `SUMMARIZER.md`.
 - Keep description-fallback requirements synchronized between `ARCHITECTURE.md` and its `SUMMARIZER.md` contract.
 - Prefer constants over new configuration parameters unless configurability is explicitly requested.
-- Do not use the official YouTube captions API for caption downloads; use `youtube-transcript-api` and eligible OpenAI audio transcription fallback.
-- Preserve the rule that videos longer than 60 minutes never download or transcribe audio.
-- Verify duration boundaries on both sides whenever the audio eligibility rule changes.
+- Do not use the official YouTube captions API for caption downloads; use `youtube-transcript-api` for native captions.
+- Keep the existing OpenAI audio-transcription implementation dormant and never activate its runtime path.
 - Do not add automated tests unless project requirements change.
 - Add a short purpose description to every class, struct, enum, and view.
 - Do not use numbered lists in Markdown files.

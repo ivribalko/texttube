@@ -28,8 +28,8 @@ from texttube.config import (
     GOOGLE_OAUTH_REAUTHORIZATION_MESSAGE,
     MAX_AUDIO_TRANSCRIPTION_DURATION_SECONDS,
     MAX_SHORT_DURATION_SECONDS,
+    MAX_VIDEO_PROCESSING_ATTEMPTS,
     OPENAI_SUMMARY_MODEL,
-    OPENAI_TRANSCRIPTION_MODEL,
     ConfigLoader,
     RuntimePaths,
 )
@@ -59,7 +59,7 @@ def parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--cache",
         action="store_true",
-        help="reuse and update transcript and audio caches",
+        help="reuse and update transcript caches",
     )
     parser.add_argument(
         "--verbose",
@@ -128,6 +128,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
             max_short_duration_seconds=MAX_SHORT_DURATION_SECONDS,
             max_audio_duration_seconds=MAX_AUDIO_TRANSCRIPTION_DURATION_SECONDS,
             default_video_limit=DEFAULT_VIDEO_LIMIT,
+            max_video_processing_attempts=MAX_VIDEO_PROCESSING_ATTEMPTS,
         )
         transcription = TranscriptResolver(
             NativeTranscriptFetcher(options.transcript_languages, log),
@@ -158,10 +159,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
 
         log.write("startup: load prompt", essential=True)
         log.write(f"prompt: {paths.display_path(prompt_path)}")
-        log.write(
-            f"openai: summary={OPENAI_SUMMARY_MODEL} "
-            f"transcription={OPENAI_TRANSCRIPTION_MODEL}"
-        )
+        log.write(f"openai: summary={OPENAI_SUMMARY_MODEL} transcription=disabled")
         if options.transcript_languages:
             log.write(
                 "transcript languages: "

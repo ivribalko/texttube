@@ -32,6 +32,14 @@ class ChannelDiscoveryFailure:
     detail: str
 
 
+@dataclass(frozen=True)
+class PendingVideoFailure:
+    """Identifies one video awaiting another processing attempt."""
+
+    video_id: str
+    failed_attempts: int
+
+
 class SummarySource(Enum):
     """Identifies the source used to create a delivered summary."""
 
