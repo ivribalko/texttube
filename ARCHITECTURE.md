@@ -85,7 +85,7 @@ Verbose application logging records the summary source, language hint, input and
 The managed paths are:
 
 - `/data/var/state/last_subscription_window_end_utc.txt` for the last completed subscription cutoff
-- `/data/var/state/pending_video_failures.json` for failed-video attempt counts and terminal notifications
+- `/data/var/state/pending_native_caption_failures.json` for native-caption attempt counts
 - `/data/var/state/google_oauth_refresh_token` for the mode-`0600` Google refresh token
 - `/data/var/logs/texttube-<UTC timestamp>.log` for one application run
 - `/data/var/texttube.lock` for scheduled-run serialization
@@ -110,15 +110,15 @@ Google credentials must use application type `TVs and Limited Input devices`. Au
 
 ## Application Components
 
-- `ApplicationPipeline` owns selected-video and subscription-window use cases, limit behavior, durable failed-video attempts, per-video isolation, and cutoff completion.
-- `VideoPipeline` owns short-video policy, summary fallback selection, terminal unavailable-message formatting, and delivery.
+- `ApplicationPipeline` owns selected-video and subscription-window use cases, limit behavior, durable native-caption attempts, per-video isolation, and cutoff completion.
+- `VideoPipeline` owns short-video policy, summary fallback selection, unavailable-message formatting, and delivery.
 - `YouTubeDiscovery` refreshes Google authorization, traverses subscriptions and upload playlists, enriches metadata, deduplicates IDs, enforces the subscription window, and reports missing channel upload playlists as recoverable discovery failures.
 - `TranscriptResolver` retrieves native captions without caching. Its audio fallback remains implemented but receives an unconditional disabled decision from the core.
 - `NativeTranscriptFetcher` retrieves captions with `youtube-transcript-api`, promotes YouTube's default audio language when it is configured, and otherwise ranks configured languages in order.
 - `OpenAIAudioTranscriber` retains the former `yt-dlp`, `ffmpeg`, and `gpt-transcribe` implementation but is not invoked.
 - `OpenAISummarizer` uses the official OpenAI Python SDK and Responses API with `gpt-5.6-luna`. Summary requests use `store: false`.
 - `TelegramDelivery` formats HTML-safe messages, truncates them to Telegram limits, disables link previews, and sends run notices.
-- `FileSubscriptionState`, `ConsoleLog`, and `ApplicationLifecycle` adapt filesystem and process concerns. Failed-video state is atomically replaced after each change. `ConsoleLog` tees visible application output to stderr and one timestamped run file, pruning files at the 30-day retention boundary when an app run starts.
+- `FileSubscriptionState`, `ConsoleLog`, and `ApplicationLifecycle` adapt filesystem and process concerns. Native-caption retry state is atomically replaced after each change. `ConsoleLog` tees visible application output to stderr and one timestamped run file, pruning files at the 30-day retention boundary when an app run starts.
 - `AuthorizationService`, `CronScheduler`, and `StackService` provide authorization maintenance, isolated scheduling, and single-container supervision.
 
 ## Per-Video Flow
@@ -128,13 +128,14 @@ Google credentials must use application type `TVs and Limited Input devices`. Au
 - Any nonempty native transcript is summarized and translated when needed.
 - Audio is never downloaded or transcribed, regardless of video duration.
 - The resolved transcript is summarized with the transcript prompt.
-- Transcript retrieval or transcript-summary failure switches to a title-guided summary of the cleaned description.
-- If description summarization also fails, the video ID is retained for a later application run instead of sending a message immediately.
-- Telegram delivery failure retains the same video ID for a later application run.
-- Each video receives at most one full processing attempt per application run.
-- After the third failed processing attempt, TextTube stops summarizing that video and sends a terminal message whose body is exactly `summary unavailable`.
-- A failed terminal Telegram delivery remains pending only for delivery; later runs do not summarize the video again.
-- Successful ordinary or terminal delivery removes the video ID from pending state.
+- Native-caption retrieval failure retains the video ID and makes no Telegram delivery on attempts one and two.
+- Each pending video receives at most one native-caption attempt per application run.
+- After the third failed native-caption attempt, TextTube removes the ID from retry state and creates a title-guided summary of the cleaned description.
+- Transcript-summary failure switches to description summarization immediately because only native-caption retrieval is retried.
+- Every description-based Telegram message starts with `Summary based on the video description.`.
+- If description summarization fails, TextTube sends `summary unavailable` without retrying it.
+- Telegram delivery failures are logged and are not added to retry state.
+- Successful transcript processing removes any earlier native-caption retry state for the video.
 - Every delivered body includes the channel, title, and YouTube link.
 
 ## Summary Rules
@@ -154,9 +155,9 @@ The summary model is `gpt-5.6-luna`. The retained audio transcription model is `
 
 A subscription run records its start time as the prospective window end. The previous completed cutoff is the window start; without a cutoff, the start defaults to 24 hours earlier.
 
-The cutoff is written only after subscription traversal completes. Fatal authentication, subscription, or run-level failures preserve the previous cutoff. Per-video fallbacks and failures do not abort traversal. Failed video IDs survive cutoff advancement in separate pending state. Subscription runs retry terminal notifications and failed videos before current-window discovery, and current-window discovery skips IDs already attempted in that run. Explicit `--video` runs update retry state only for the selected ID. A channel whose uploads playlist returns YouTube's `playlistNotFound` or `playlistOperationUnsupported` error is logged, announced through Telegram, and skipped without blocking cutoff completion. Resetting the cutoff is an operator action performed while holding the scheduler lock.
+The cutoff is written only after subscription traversal completes. Fatal authentication, subscription, or run-level failures preserve the previous cutoff. Per-video fallbacks and failures do not abort traversal. Native-caption failures survive cutoff advancement in separate pending state. Subscription runs retry pending caption IDs before current-window discovery, and current-window discovery skips IDs already attempted in that run. Explicit `--video` runs update caption retry state only for the selected ID. A channel whose uploads playlist returns YouTube's `playlistNotFound` or `playlistOperationUnsupported` error is logged, announced through Telegram, and skipped without blocking cutoff completion. Resetting the cutoff is an operator action performed while holding the scheduler lock.
 
-The default message limit is 100. Probable Shorts do not count. Delivered transcript, description-fallback, and terminal unavailable messages count. Reaching the default cap sends a final limit notice.
+The default message limit is 100. Probable Shorts do not count. Delivered transcript, description-fallback, and unavailable messages count. Reaching the default cap sends a final limit notice.
 
 The scheduler:
 
@@ -169,9 +170,9 @@ The scheduler:
 
 ## Failure Behavior
 
-- Every individual HTTP request is attempted once. The OpenAI client uses `max_retries=0`; device authorization performs protocol-required polling. Durable video retries occur once per later application run rather than inside a request.
+- Every individual HTTP request is attempted once. The OpenAI client uses `max_retries=0`; device authorization performs protocol-required polling. Durable native-caption retries occur once per later application run rather than inside a request.
 - YouTube `playlistNotFound` and `playlistOperationUnsupported` errors for an individual subscription channel produce a Telegram notice and allow remaining channels to continue.
-- Expected per-video failures use the description fallback, persist the video ID when no message is delivered, and allow later videos to continue.
+- Native-caption retrieval failures persist the video ID through attempt two. Other expected per-video failures use the description fallback or allow later videos to continue without persistence.
 - Fatal failures after Telegram construction trigger a run-level notice.
 - Google OAuth `invalid_grant` produces a reauthorization-specific notice and preserves the subscription window.
 - Error details are hidden unless verbose logging is enabled.

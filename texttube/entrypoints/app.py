@@ -27,7 +27,7 @@ from texttube.config import (
     GOOGLE_OAUTH_REAUTHORIZATION_MESSAGE,
     MAX_AUDIO_TRANSCRIPTION_DURATION_SECONDS,
     MAX_SHORT_DURATION_SECONDS,
-    MAX_VIDEO_PROCESSING_ATTEMPTS,
+    MAX_NATIVE_CAPTION_ATTEMPTS,
     OPENAI_SUMMARY_MODEL,
     ConfigLoader,
     RuntimePaths,
@@ -122,7 +122,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
             max_short_duration_seconds=MAX_SHORT_DURATION_SECONDS,
             max_audio_duration_seconds=MAX_AUDIO_TRANSCRIPTION_DURATION_SECONDS,
             default_video_limit=DEFAULT_VIDEO_LIMIT,
-            max_video_processing_attempts=MAX_VIDEO_PROCESSING_ATTEMPTS,
+            max_native_caption_attempts=MAX_NATIVE_CAPTION_ATTEMPTS,
         )
         transcription = TranscriptResolver(
             NativeTranscriptFetcher(options.transcript_languages, log),

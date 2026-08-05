@@ -7,7 +7,7 @@ from typing import Iterable, Protocol
 
 from texttube.domain import (
     ChannelDiscoveryFailure,
-    PendingVideoFailure,
+    PendingCaptionFailure,
     Summary,
     Transcript,
     Video,
@@ -62,19 +62,17 @@ class Delivery(Protocol):
 
 
 class State(Protocol):
-    """Persists subscription progress and failed-video retry state."""
+    """Persists subscription progress and native-caption retry state."""
 
     def subscription_window(self) -> tuple[datetime, datetime]: ...
 
     def complete_window(self, window_end: datetime) -> None: ...
 
-    def pending_video_failures(self) -> tuple[PendingVideoFailure, ...]: ...
+    def pending_caption_failures(self) -> tuple[PendingCaptionFailure, ...]: ...
 
-    def pending_unavailable_notices(self) -> tuple[str, ...]: ...
+    def record_caption_failure(self, video_id: str) -> int: ...
 
-    def record_video_failure(self, video_id: str) -> int: ...
-
-    def complete_video(self, video_id: str) -> None: ...
+    def complete_caption_retry(self, video_id: str) -> None: ...
 
 
 class Log(Protocol):

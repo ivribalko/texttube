@@ -19,6 +19,10 @@ class VideoFailure(Exception):
     """Per-video failure that allows later videos to continue."""
 
 
+class NativeTranscriptUnavailable(VideoFailure):
+    """Native YouTube captions could not provide a usable transcript."""
+
+
 class DeliveryFailure(Exception):
     """Delivery failure for one outbound message."""
 
@@ -33,8 +37,8 @@ class ChannelDiscoveryFailure:
 
 
 @dataclass(frozen=True)
-class PendingVideoFailure:
-    """Identifies one video awaiting another processing attempt."""
+class PendingCaptionFailure:
+    """Identifies one video awaiting another native-caption attempt."""
 
     video_id: str
     failed_attempts: int

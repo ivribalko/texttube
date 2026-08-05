@@ -6,10 +6,11 @@ import html
 from typing import Any
 
 from texttube.config import AppConfig, REQUEST_TIMEOUT_SECONDS
-from texttube.domain import DeliveryFailure, Summary, Video
+from texttube.domain import DeliveryFailure, Summary, SummarySource, Video
 from texttube.ports import Log
 
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+DESCRIPTION_FALLBACK_NOTICE = "Summary based on the video description."
 
 
 class TelegramDelivery:
@@ -25,7 +26,10 @@ class TelegramDelivery:
         """Build one HTML-safe message within Telegram's length boundary."""
         link = f"https://youtu.be/{video.video_id}"
         header = f"<i>{html.escape(video.channel_title)}</i>: {html.escape(video.title)}"
-        escaped_body = html.escape(summary.text.strip())
+        body = summary.text.strip()
+        if summary.source is SummarySource.DESCRIPTION:
+            body = f"{DESCRIPTION_FALLBACK_NOTICE}\n\n{body}"
+        escaped_body = html.escape(body)
         message = f"{header}\n\n{escaped_body}\n\n{link}"
         if len(message) <= TELEGRAM_MAX_MESSAGE_LENGTH:
             return message

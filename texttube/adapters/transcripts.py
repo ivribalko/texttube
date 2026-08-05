@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from texttube.domain import Transcript, Video, VideoFailure
+from texttube.domain import NativeTranscriptUnavailable, Transcript, Video, VideoFailure
 from texttube.ports import AudioTranscription, Log
 
 
@@ -229,7 +229,7 @@ class TranscriptResolver:
         except VideoFailure as transcript_exc:
             self.log.write(f"transcript fallback {video.video_id}: {transcript_exc}")
             if not allow_audio:
-                raise VideoFailure(
+                raise NativeTranscriptUnavailable(
                     f"{transcript_exc}; audio transcription skipped because "
                     "it is disabled"
                 ) from transcript_exc

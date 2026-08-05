@@ -146,8 +146,10 @@ The model names are application constants rather than operator settings:
 - Videos up to three minutes long are treated as probable Shorts and skipped.
 - Videos of every duration may use native captions but never download or transcribe audio.
 - A failed transcript path falls back to a title-guided summary of the cleaned video description.
-- If TextTube cannot summarize a video or deliver its Telegram message, it retains the video ID and retries once per later application run until the video reaches three total attempts.
-- After three failed processing attempts, TextTube stops summarizing that video and sends `summary unavailable`. A failed terminal delivery is retried without further summarization.
+- If native YouTube captions are unavailable, TextTube retains the video ID and retries captions once per later application run until the video reaches three caption attempts.
+- After three failed native-caption attempts, TextTube summarizes the description and labels the Telegram message `Summary based on the video description.`.
+- A transcript-summary failure uses the labeled description fallback immediately. Telegram delivery and summary-generation failures are not retried.
+- If description summarization also fails, TextTube sends `summary unavailable`.
 - A subscribed channel with a missing or unsupported YouTube uploads playlist is logged, announced through Telegram, and skipped while the run continues.
 - The subscription cutoff advances after the run finishes, including runs where individual videos use fallbacks.
 - Scheduled runs never overlap.
@@ -160,7 +162,7 @@ Compose persists credentials, state, and logs in the managed `texttube-data` vol
 
 - `/data/var/state/google_oauth_refresh_token` stores the Google refresh token with owner-only permissions.
 - `/data/var/state/last_subscription_window_end_utc.txt` stores the completed subscription cutoff.
-- `/data/var/state/pending_video_failures.json` stores failed-video attempt counts and terminal notifications.
+- `/data/var/state/pending_native_caption_failures.json` stores native-caption attempt counts.
 - `/data/var/logs/` stores one timestamped file for each application run and retains it for less than 30 days.
 - `/data/var/texttube.lock` enforces singleton scheduled runs.
 
