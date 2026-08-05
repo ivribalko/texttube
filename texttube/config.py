@@ -19,12 +19,9 @@ OPENAI_TRANSCRIPTION_TIMEOUT_SECONDS = 1800
 MAX_AUDIO_TRANSCRIPTION_DURATION_SECONDS = 60 * 60
 MAX_SHORT_DURATION_SECONDS = 3 * 60
 DEFAULT_VIDEO_LIMIT = 100
-CACHE_DIR_NAME = "cache"
 LOG_DIR_NAME = "logs"
 LOG_FILE_PREFIX = "texttube-"
 LOG_RETENTION_DAYS = 30
-AUDIO_CACHE_EXTENSION = ".m4a"
-TRANSCRIPT_CACHE_EXTENSION = ".txt"
 SUBSCRIPTION_STATE_DIR_NAME = "state"
 LAST_SUBSCRIPTION_WINDOW_END_FILE = "last_subscription_window_end_utc.txt"
 PENDING_VIDEO_FAILURES_FILE = "pending_video_failures.json"
@@ -60,7 +57,6 @@ class RuntimeOptions:
 
     limit: int
     video_id: str | None
-    cache: bool
     verbose: bool
     transcript_languages: tuple[str, ...]
 
@@ -264,7 +260,6 @@ class ConfigLoader:
         return RuntimeOptions(
             limit=limit,
             video_id=video_id,
-            cache=args.cache,
             verbose=verbose,
             transcript_languages=cls.parse_transcript_languages(
                 values.get("TRANSCRIPT_LANGUAGES", "").strip()

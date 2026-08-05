@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 from typing import Iterable, Protocol
 
 from texttube.domain import (
@@ -37,20 +36,13 @@ class Transcription(Protocol):
         video: Video,
         *,
         allow_audio: bool,
-        audio_cache_path: Path | None,
-        transcript_cache_path: Path | None,
     ) -> Transcript: ...
 
 
 class AudioTranscription(Protocol):
     """Downloads and transcribes one video's audio when the core permits it."""
 
-    def fetch(
-        self,
-        video_id: str,
-        *,
-        audio_cache_path: Path | None,
-    ) -> Transcript: ...
+    def fetch(self, video_id: str) -> Transcript: ...
 
 
 class Summarization(Protocol):
@@ -83,14 +75,6 @@ class State(Protocol):
     def record_video_failure(self, video_id: str) -> int: ...
 
     def complete_video(self, video_id: str) -> None: ...
-
-
-class CachePaths(Protocol):
-    """Selects optional per-video cache paths for one invocation."""
-
-    def audio(self, video_id: str) -> Path | None: ...
-
-    def transcript(self, video_id: str) -> Path | None: ...
 
 
 class Log(Protocol):

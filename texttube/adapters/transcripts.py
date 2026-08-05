@@ -1,9 +1,8 @@
-"""Native-caption selection and transcript fallback/cache adapter."""
+"""Native-caption selection and dormant audio-fallback adapter."""
 
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 from typing import Any
 
 from texttube.domain import Transcript, Video, VideoFailure
@@ -200,7 +199,7 @@ class NativeTranscriptFetcher:
         raise VideoFailure("transcript unavailable: transcript was empty")
 
 class TranscriptResolver:
-    """Resolves cached or native-caption transcripts with dormant audio code."""
+    """Resolves native-caption transcripts with dormant audio code."""
 
     def __init__(
         self,
@@ -217,19 +216,8 @@ class TranscriptResolver:
         video: Video,
         *,
         allow_audio: bool,
-        audio_cache_path: Path | None,
-        transcript_cache_path: Path | None,
     ) -> Transcript:
         """Resolve a transcript while honoring the core's audio decision."""
-        if transcript_cache_path and transcript_cache_path.exists():
-            cached = transcript_cache_path.read_text(encoding="utf-8").strip()
-            if cached:
-                self.log.write(
-                    f"transcript cache: hit {transcript_cache_path.name}: "
-                    f"language=unknown chars={len(cached)} "
-                    f"lines={len(cached.splitlines())}"
-                )
-                return Transcript(text=cached)
         try:
             self.log.write(
                 f"process {video.video_id}: native transcript", essential=True
@@ -246,10 +234,7 @@ class TranscriptResolver:
                     "it is disabled"
                 ) from transcript_exc
             try:
-                result = self.audio.fetch(
-                    video.video_id,
-                    audio_cache_path=audio_cache_path,
-                )
+                result = self.audio.fetch(video.video_id)
                 if not result.language_code and video.default_audio_language:
                     result = replace(
                         result,
@@ -261,14 +246,4 @@ class TranscriptResolver:
                     )
             except VideoFailure as audio_exc:
                 raise VideoFailure(f"{transcript_exc}; {audio_exc}") from audio_exc
-        if transcript_cache_path:
-            transcript_text = result.text.strip()
-            if transcript_text:
-                transcript_cache_path.parent.mkdir(parents=True, exist_ok=True)
-                transcript_cache_path.write_text(
-                    f"{transcript_text}\n", encoding="utf-8"
-                )
-                self.log.write(
-                    f"transcript cache: stored {transcript_cache_path.name}"
-                )
         return result

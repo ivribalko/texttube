@@ -91,11 +91,11 @@ Run one subscription pass:
 docker compose run --rm texttube app
 ```
 
-Run one video with cache reuse and verbose logging:
+Run one video with verbose logging:
 
 ```sh
 docker compose run --rm texttube app \
-  --video "https://www.youtube.com/watch?v=VIDEO_ID" --cache --verbose
+  --video "https://www.youtube.com/watch?v=VIDEO_ID" --verbose
 ```
 
 Run without the default 100-message limit:
@@ -156,12 +156,11 @@ The complete processing and failure rules are canonical in [ARCHITECTURE.md](ARC
 
 ## Runtime Data
 
-Compose persists credentials, state, and caches in the managed `texttube-data` volume mounted at `/data/var`.
+Compose persists credentials, state, and logs in the managed `texttube-data` volume mounted at `/data/var`.
 
 - `/data/var/state/google_oauth_refresh_token` stores the Google refresh token with owner-only permissions.
 - `/data/var/state/last_subscription_window_end_utc.txt` stores the completed subscription cutoff.
 - `/data/var/state/pending_video_failures.json` stores failed-video attempt counts and terminal notifications.
-- `/data/var/cache/` stores transcript entries created by manual runs with `--cache`; retained audio cache code is inactive.
 - `/data/var/logs/` stores one timestamped file for each application run and retains it for less than 30 days.
 - `/data/var/texttube.lock` enforces singleton scheduled runs.
 

@@ -16,7 +16,6 @@ from texttube.domain import (
     VideoStatus,
 )
 from texttube.ports import (
-    CachePaths,
     Delivery,
     Log,
     State,
@@ -46,14 +45,12 @@ class VideoPipeline:
         transcription: Transcription,
         summarization: Summarization,
         delivery: Delivery,
-        cache_paths: CachePaths,
         policy: ProcessingPolicy,
         log: Log,
     ):
         self.transcription = transcription
         self.summarization = summarization
         self.delivery = delivery
-        self.cache_paths = cache_paths
         self.policy = policy
         self.log = log
 
@@ -114,8 +111,6 @@ class VideoPipeline:
             transcript = self.transcription.fetch(
                 video,
                 allow_audio=self.is_audio_allowed(video),
-                audio_cache_path=None,
-                transcript_cache_path=self.cache_paths.transcript(video.video_id),
             )
             self.log.write(
                 f"process {video.video_id}: summarize transcript "

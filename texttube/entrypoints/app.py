@@ -15,7 +15,6 @@ from texttube.adapters.openai import (
 from texttube.adapters.state import (
     ApplicationLifecycle,
     ConsoleLog,
-    FileCachePaths,
     FileSubscriptionState,
 )
 from texttube.adapters.telegram import TelegramDelivery
@@ -55,11 +54,6 @@ def parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
         default="",
         metavar="URL_OR_ID",
         help="process one YouTube video instead of subscriptions",
-    )
-    parser.add_argument(
-        "--cache",
-        action="store_true",
-        help="reuse and update transcript caches",
     )
     parser.add_argument(
         "--verbose",
@@ -144,7 +138,6 @@ def main(arguments: Sequence[str] | None = None) -> int:
                 log,
             ),
             delivery,
-            FileCachePaths(paths, enabled=options.cache),
             policy,
             log,
         )

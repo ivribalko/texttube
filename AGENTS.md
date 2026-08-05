@@ -51,11 +51,10 @@ docker compose --env-file .env \
   --file compose.yaml --file compose.local.yaml \
   run --build --rm texttube app \
   --video "https://www.youtube.com/watch?v=VIDEO_ID" \
-  --cache \
   --verbose
 ```
 
-Append application arguments such as `--video URL_OR_ID`, `--cache`, `--limit N`, or `--verbose` after `app`. The local override preserves the Compose-managed environment and data volume while replacing the published image with a build from the current source. Manual-run output remains in the live terminal, and `--rm` removes the container when it exits.
+Append application arguments such as `--video URL_OR_ID`, `--limit N`, or `--verbose` after `app`. The local override preserves the Compose-managed environment and data volume while replacing the published image with a build from the current source. Manual-run output remains in the live terminal, and `--rm` removes the container when it exits.
 
 ## Subscription Cutoff
 

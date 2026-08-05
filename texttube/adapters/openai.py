@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import html
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -238,13 +237,8 @@ class OpenAIAudioTranscriber:
         self.client = client
         self.log = log
 
-    def fetch(
-        self,
-        video_id: str,
-        *,
-        audio_cache_path: Path | None = None,
-    ) -> Transcript:
-        """Download or reuse audio, split it, and transcribe sequentially."""
+    def fetch(self, video_id: str) -> Transcript:
+        """Download temporary audio, split it, and transcribe sequentially."""
         self.log.write(
             f"transcript audio: start {video_id} model={OPENAI_TRANSCRIPTION_MODEL}"
         )
@@ -253,70 +247,55 @@ class OpenAIAudioTranscriber:
             video_url = f"https://www.youtube.com/watch?v={video_id}"
             with tempfile.TemporaryDirectory(prefix="texttube-audio-") as temp_dir:
                 temp_path = Path(temp_dir)
-                if audio_cache_path and audio_cache_path.exists():
-                    audio_path = audio_cache_path
-                    self.log.write(
-                        f"transcript audio: cache hit {audio_cache_path.name}"
+                output_template = str(temp_path / "audio.%(ext)s")
+                command = [
+                    sys.executable,
+                    "-m",
+                    "yt_dlp",
+                    "--no-playlist",
+                    "--extract-audio",
+                    "--audio-format",
+                    "m4a",
+                    "--output",
+                    output_template,
+                    video_url,
+                ]
+                try:
+                    self.log.write(f"transcript audio: yt-dlp {video_id}")
+                    completed = subprocess.run(
+                        command,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=3600,
                     )
-                else:
-                    output_template = str(temp_path / "audio.%(ext)s")
-                    command = [
-                        sys.executable,
-                        "-m",
-                        "yt_dlp",
-                        "--no-playlist",
-                        "--extract-audio",
-                        "--audio-format",
-                        "m4a",
-                        "--output",
-                        output_template,
-                        video_url,
-                    ]
-                    try:
-                        self.log.write(f"transcript audio: yt-dlp {video_id}")
-                        completed = subprocess.run(
-                            command,
-                            check=True,
-                            capture_output=True,
-                            text=True,
-                            timeout=3600,
-                        )
-                    except subprocess.TimeoutExpired as exc:
-                        raise VideoFailure(
-                            "audio transcript unavailable: audio download timed out"
-                        ) from exc
-                    except subprocess.CalledProcessError as exc:
-                        detail = (exc.stderr or exc.stdout or str(exc)).strip().splitlines()[-1:]
-                        reason = detail[0] if detail else str(exc)
-                        raise VideoFailure(
-                            f"audio transcript unavailable: yt-dlp failed: {reason[:300]}"
-                        ) from exc
-                    audio_files = [path for path in temp_path.iterdir() if path.is_file()]
-                    if not audio_files:
-                        detail = completed.stderr.strip().splitlines()[-1:]
-                        reason = (
-                            detail[0]
-                            if detail
-                            else "yt-dlp did not create an audio file"
-                        )
-                        raise VideoFailure(
-                            f"audio transcript unavailable: {reason[:300]}"
-                        )
-                    downloaded_audio_path = max(
-                        audio_files, key=lambda path: path.stat().st_size
+                except subprocess.TimeoutExpired as exc:
+                    raise VideoFailure(
+                        "audio transcript unavailable: audio download timed out"
+                    ) from exc
+                except subprocess.CalledProcessError as exc:
+                    detail = (exc.stderr or exc.stdout or str(exc)).strip().splitlines()[-1:]
+                    reason = detail[0] if detail else str(exc)
+                    raise VideoFailure(
+                        f"audio transcript unavailable: yt-dlp failed: {reason[:300]}"
+                    ) from exc
+                audio_files = [path for path in temp_path.iterdir() if path.is_file()]
+                if not audio_files:
+                    detail = completed.stderr.strip().splitlines()[-1:]
+                    reason = (
+                        detail[0]
+                        if detail
+                        else "yt-dlp did not create an audio file"
                     )
-                    self.log.write(
-                        f"transcript audio: downloaded {downloaded_audio_path.name}"
+                    raise VideoFailure(
+                        f"audio transcript unavailable: {reason[:300]}"
                     )
-                    if audio_cache_path:
-                        audio_cache_path.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(downloaded_audio_path, audio_cache_path)
-                        audio_path = audio_cache_path
-                        self.log.write(
-                            f"transcript audio: cached {audio_cache_path.name}"
-                        )
-                    else:
-                        audio_path = downloaded_audio_path
+                audio_path = max(
+                    audio_files, key=lambda path: path.stat().st_size
+                )
+                self.log.write(
+                    f"transcript audio: downloaded {audio_path.name}"
+                )
                 chunk_dir = temp_path / "chunks"
                 chunk_dir.mkdir()
                 segment_command = [

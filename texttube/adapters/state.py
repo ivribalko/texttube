@@ -1,4 +1,4 @@
-"""Filesystem, cache-path, logging, and process-lifecycle adapters."""
+"""Filesystem state, logging, and process-lifecycle adapters."""
 
 from __future__ import annotations
 
@@ -11,16 +11,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from texttube.config import (
-    AUDIO_CACHE_EXTENSION,
-    CACHE_DIR_NAME,
     LAST_SUBSCRIPTION_WINDOW_END_FILE,
     LOG_FILE_PREFIX,
     LOG_RETENTION_DAYS,
     MAX_VIDEO_PROCESSING_ATTEMPTS,
     PENDING_VIDEO_FAILURES_FILE,
     SUBSCRIPTION_STATE_DIR_NAME,
-    TRANSCRIPT_CACHE_EXTENSION,
-    RuntimePaths,
     ValueParser,
 )
 from texttube.domain import FatalError, PendingVideoFailure
@@ -96,36 +92,6 @@ class ConsoleLog:
             f"TextTube run-file logging stopped: {error}",
             file=sys.stderr,
             flush=True,
-        )
-
-
-class FileCachePaths:
-    """Provides cache paths only when cache reuse is enabled for the run."""
-
-    def __init__(self, paths: RuntimePaths, *, enabled: bool):
-        self.paths = paths
-        self.enabled = enabled
-
-    def audio(self, video_id: str) -> Path | None:
-        """Return the optional cached-audio path for one video."""
-        if not self.enabled:
-            return None
-        return (
-            self.paths.state_root
-            / "var"
-            / CACHE_DIR_NAME
-            / f"{video_id}{AUDIO_CACHE_EXTENSION}"
-        )
-
-    def transcript(self, video_id: str) -> Path | None:
-        """Return the optional cached-transcript path for one video."""
-        if not self.enabled:
-            return None
-        return (
-            self.paths.state_root
-            / "var"
-            / CACHE_DIR_NAME
-            / f"{video_id}{TRANSCRIPT_CACHE_EXTENSION}"
         )
 
 
