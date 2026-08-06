@@ -11,6 +11,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for processing rules, failure behavior, a
 - A Telegram bot token and target chat ID
 - A Google Cloud project with YouTube Data API v3 enabled
 - Google OAuth credentials with application type `TVs and Limited Input devices`
+- Optional: a WireGuard VPN account and compatible gateway image for automatic caption IP rotation
 
 All inference runs through OpenAI using the official OpenAI Python SDK. The container does not download or run model weights.
 
@@ -48,6 +49,43 @@ The service validates the refresh token when it starts and once per hour. A fail
 No callback port, public domain, workstation helper, repository checkout, or `compose.local.yaml` is required on the server.
 
 Manual commands use `docker compose run` and do not disturb the long-running service.
+
+## Automatic VPN IP Rotation
+
+The optional `vpn` profile in [compose.yaml](compose.yaml) runs a private WireGuard gateway and HTTP proxy. Native-caption requests use the normal connection until YouTube explicitly blocks its IP. Only the blocked caption request and subsequent caption requests in that application run use the proxy. Google authorization, YouTube Data API discovery, OpenAI, and Telegram always use the normal container connection.
+
+When the direct request returns `RequestBlocked` or `IpBlocked`, TextTube retries the same video through the gateway's current exit. If that exit is also blocked, TextTube asks the gateway to reconnect, waits for it to report a different public IP, and retries. It attempts at most three fresh VPN exits after the initially blocked VPN exit. Exhausting those rotations records one native-caption failure under the normal durable retry policy.
+
+Prepare the ignored deployment environment with:
+
+- `COMPOSE_PROFILES=vpn`: enables the gateway service in the single Compose file
+- `VPN_GATEWAY_IMAGE`: the compatible gateway container image and tag
+- `VPN_SERVICE_PROVIDER`: the gateway's private provider identifier
+- `VPN_PROTOCOL=wireguard` and `VPN_PRIVATE_KEY`: the tunnel protocol and private key
+- `VPN_CONTROL_API_KEY`: a private key for the gateway control API
+- Optional `VPN_SERVER_COUNTRIES`: a provider-specific pool filter
+
+Generate the gateway control key with the configured image:
+
+```sh
+docker run --rm "${VPN_GATEWAY_IMAGE}" genkey
+```
+
+Start the published image with automatic VPN rotation:
+
+```sh
+docker compose --env-file .env up --detach --pull always
+```
+
+Run the current source with the same VPN profile:
+
+```sh
+docker compose --env-file .env \
+  --file compose.yaml --file compose.local.yaml \
+  run --build --rm texttube app
+```
+
+The proxy and control ports remain private to the Compose network and must not be published. VPN exit addresses may themselves be blocked by YouTube, so rotation cannot guarantee that the configured pool contains an accepted address.
 
 ## Local Source Runs
 
@@ -136,6 +174,8 @@ Compose supplies application values through the process environment. Command-lin
 
 `TRANSCRIPT_LANGUAGES` is an ordered, comma-separated list. When YouTube's default audio language belongs to that list, its native captions are attempted first; otherwise configured order is preserved. Captions in every other available language follow. YouTube's caption or default-audio language code is passed to transcript summarization when available. A transcript already in one of the configured languages is summarized in the same language; for any other transcript language, the model chooses the most appropriate configured language and translates the summary into it. Audio transcription is disabled.
 
+The `vpn` profile maps `VPN_CONTROL_API_KEY` to the application. A nonempty control key enables the fixed private proxy and control endpoints; operators do not configure those internal addresses. The application never prints an endpoint, control key, provider, or VPN public IP.
+
 The model names are application constants rather than operator settings:
 
 - `gpt-5.6-luna` generates transcript and description summaries.
@@ -145,7 +185,7 @@ The model names are application constants rather than operator settings:
 
 - Videos up to three minutes long are treated as probable Shorts and skipped.
 - Videos of every duration may use native captions but never download or transcribe audio.
-- A failed transcript path falls back to a title-guided summary of the cleaned video description.
+- Native captions use the direct connection until its IP is blocked, then retry through the VPN and rotate through at most three fresh VPN exits before the caption attempt fails.
 - If native YouTube captions are unavailable, TextTube retains the video ID and retries captions once per later application run until the video reaches three caption attempts.
 - After three failed native-caption attempts, TextTube summarizes the description and labels the Telegram message `Summary based on the video description.`.
 - A transcript-summary failure uses the labeled description fallback immediately. Telegram delivery and summary-generation failures are not retried.

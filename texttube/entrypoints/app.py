@@ -18,7 +18,11 @@ from texttube.adapters.state import (
     FileSubscriptionState,
 )
 from texttube.adapters.telegram import TelegramDelivery
-from texttube.adapters.transcripts import NativeTranscriptFetcher, TranscriptResolver
+from texttube.adapters.transcripts import (
+    NativeTranscriptFetcher,
+    TranscriptProxyRotator,
+    TranscriptResolver,
+)
 from texttube.adapters.youtube import YouTubeDiscovery
 from texttube.config import (
     DEFAULT_VIDEO_LIMIT,
@@ -124,8 +128,18 @@ def main(arguments: Sequence[str] | None = None) -> int:
             default_video_limit=DEFAULT_VIDEO_LIMIT,
             max_native_caption_attempts=MAX_NATIVE_CAPTION_ATTEMPTS,
         )
+        proxy_rotator = (
+            TranscriptProxyRotator(session, config.transcript_proxy, log)
+            if config.transcript_proxy is not None
+            else None
+        )
         transcription = TranscriptResolver(
-            NativeTranscriptFetcher(options.transcript_languages, log),
+            NativeTranscriptFetcher(
+                options.transcript_languages,
+                log,
+                proxy_config=config.transcript_proxy,
+                proxy_rotator=proxy_rotator,
+            ),
             OpenAIAudioTranscriber(openai_sdk, log),
             log,
         )
@@ -153,6 +167,11 @@ def main(arguments: Sequence[str] | None = None) -> int:
         log.write("startup: load prompt", essential=True)
         log.write(f"prompt: {paths.display_path(prompt_path)}")
         log.write(f"openai: summary={OPENAI_SUMMARY_MODEL} transcription=disabled")
+        if config.transcript_proxy is not None:
+            log.write(
+                "transcript proxy: enabled with automatic IP rotation",
+                essential=True,
+            )
         if options.transcript_languages:
             log.write(
                 "transcript languages: "

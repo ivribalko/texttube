@@ -10,7 +10,7 @@ This document is canonical for structure, dependency direction, data flow, state
 - The application remains a small Python package without an application framework.
 - Business orchestration has no SDK, HTTP, filesystem, or subprocess knowledge.
 - Python installation, execution, and validation stay inside Docker.
-- Docker Compose exposes one service backed by one managed data volume.
+- Docker Compose exposes one application service backed by one managed data volume and an optional profiled VPN gateway.
 - The official YouTube captions API is not used for caption downloads.
 - Model roles and cost choices are fixed application constants.
 - Scheduled runs are singletons.
@@ -47,7 +47,7 @@ texttube/
 - `entrypoints/` contains the executable `app`, `auth`, `scheduler`, and `service` process surfaces. These modules parse commands, construct dependencies, and are launched with `python -m`.
 - `SUMMARIZER.md` defines transcript and description summary input and output behavior.
 - `Dockerfile` builds the shared Linux image.
-- `compose.yaml` defines the single published-image service and managed volume.
+- `compose.yaml` defines the published-image service, managed volume, and optional generic VPN profile.
 - `compose.local.yaml` replaces the published image with a local build and loads the required repository-root `.env` file.
 
 ## Dependency Direction
@@ -65,6 +65,8 @@ entrypoints → adapters → ports → domain
 ## Container Runtime
 
 The workflow publishes `ghcr.io/ivribalko/texttube:latest` for `linux/amd64` and `linux/arm64`, plus an immutable `sha-<commit>` tag. Compose pulls `latest`, sets `TEXTTUBE_HOME=/data`, and mounts `texttube-data` at `/data/var`.
+
+The optional `vpn` profile adds a gateway on the private Compose network. The gateway owns the WireGuard tunnel, network capability, kill switch, HTTP proxy, and authenticated control API. TextTube keeps its normal network namespace. Native-caption requests start on the direct route. After an explicit direct IP block, the failed request and remaining native-caption requests in that application run traverse the proxy. The control and proxy ports are not published. Google authorization, YouTube Data API discovery, OpenAI, and Telegram do not traverse the VPN. Image, provider, credential, and pool details come only from the ignored deployment environment.
 
 The container entrypoint accepts these modes:
 
@@ -104,6 +106,8 @@ Compose maps credentials directly into the unified service. Required credentials
 
 Local source runs use the Git-ignored repository-root `.env` file through `compose.local.yaml`. Published-image deployments continue to accept values from the Compose environment without requiring that file.
 
+Automatic VPN rotation additionally requires the gateway image, provider identifier, WireGuard key, and control key in the ignored deployment environment. Compose maps the control key into the application, where a nonempty value enables fixed private proxy and control endpoints. TextTube never logs an endpoint, provider, control key, WireGuard key, or VPN public IP.
+
 `CRON` is required by `serve` and `scheduler` modes but ignored by manual `app` and `auth` commands. `TZ` is an IANA timezone for cron evaluation and container-local log timestamps; Compose defaults it to `UTC`. Subscription boundaries and run-log filenames remain in UTC. `TRANSCRIPT_LANGUAGES` controls native-caption preference order and acceptable transcript-summary languages. `TEXTTUBE_LIMIT` and `TEXTTUBE_VERBOSE` provide application defaults. `SUMMARIZER_MD` selects the summary prompt document outside the packaged Compose workflow.
 
 Google credentials must use application type `TVs and Limited Input devices`. Authorization exchanges the stored refresh token for an access token at startup and hourly. A valid token updates container health readiness. A missing or rejected token triggers Google’s YouTube read-only device flow, prints only the verification URL and user code, polls at Google’s required interval, and atomically stores the replacement token with owner-only permissions. The refresh token is never printed or exposed through a Compose environment variable.
@@ -115,6 +119,7 @@ Google credentials must use application type `TVs and Limited Input devices`. Au
 - `YouTubeDiscovery` refreshes Google authorization, traverses subscriptions and upload playlists, enriches metadata, deduplicates IDs, enforces the subscription window, and reports missing channel upload playlists as recoverable discovery failures.
 - `TranscriptResolver` retrieves native captions without caching. Its audio fallback remains implemented but receives an unconditional disabled decision from the core.
 - `NativeTranscriptFetcher` retrieves captions with `youtube-transcript-api`, promotes YouTube's default audio language when it is configured, and otherwise ranks configured languages in order.
+- `TranscriptProxyRotator` reconnects the optional VPN tunnel, verifies that its public IP changed, and exposes no address or credential in application logs.
 - `OpenAIAudioTranscriber` retains the former `yt-dlp`, `ffmpeg`, and `gpt-transcribe` implementation but is not invoked.
 - `OpenAISummarizer` uses the official OpenAI Python SDK and Responses API with `gpt-5.6-luna`. Summary requests use `store: false`.
 - `TelegramDelivery` formats HTML-safe messages, truncates them to Telegram limits, disables link previews, and sends run notices.
@@ -125,11 +130,12 @@ Google credentials must use application type `TVs and Limited Input devices`. Au
 
 - Videos with a known duration of three minutes or less are probable Shorts and are skipped.
 - Native captions are attempted first. YouTube's default audio language is first when it belongs to `TRANSCRIPT_LANGUAGES`; otherwise configured order is preserved. Every other available language follows.
+- With the optional VPN proxy, native captions use the direct route until YouTube returns `RequestBlocked` or `IpBlocked`. The failed operation retries through the current VPN exit, and remaining caption requests in the application run stay on the proxy. A blocked VPN exit reconnects the gateway, waits for a different public IP, and retries the same operation. At most three fresh VPN exits follow the initially blocked VPN exit.
 - Any nonempty native transcript is summarized and translated when needed.
 - Audio is never downloaded or transcribed, regardless of video duration.
 - The resolved transcript is summarized with the transcript prompt.
 - Native-caption retrieval failure retains the video ID and makes no Telegram delivery on attempts one and two.
-- Each pending video receives at most one native-caption attempt per application run.
+- Each pending video receives at most one durable native-caption attempt per application run; bounded fresh-IP retries remain inside that attempt.
 - After the third failed native-caption attempt, TextTube removes the ID from retry state and creates a title-guided summary of the cleaned description.
 - Transcript-summary failure switches to description summarization immediately because only native-caption retrieval is retried.
 - Every description-based Telegram message starts with `Summary based on the video description.`.
@@ -170,7 +176,8 @@ The scheduler:
 
 ## Failure Behavior
 
-- Every individual HTTP request is attempted once. The OpenAI client uses `max_retries=0`; device authorization performs protocol-required polling. Durable native-caption retries occur once per later application run rather than inside a request.
+- Every individual HTTP request is attempted once. The OpenAI client uses `max_retries=0`; device authorization performs protocol-required polling. An explicit direct YouTube IP block may restart caption resolution on the current VPN exit, and a blocked VPN exit may restart it on at most three fresh exits. Other durable native-caption retries occur once per later application run rather than inside a request.
+- VPN rotation stops and starts the gateway through its authenticated private control API, waits for the tunnel to report `running`, and requires a nonempty public IP different from every rejected exit before retrying. Rotation timeout or pool exhaustion becomes the current run's single native-caption failure.
 - YouTube `playlistNotFound` and `playlistOperationUnsupported` errors for an individual subscription channel produce a Telegram notice and allow remaining channels to continue.
 - Native-caption retrieval failures persist the video ID through attempt two. Other expected per-video failures use the description fallback or allow later videos to continue without persistence.
 - Fatal failures after Telegram construction trigger a run-level notice.
@@ -187,6 +194,7 @@ The scheduler:
 - `openai` is the official client for Responses API summaries and the retained audio-transcription implementation.
 - `croniter` validates expressions and calculates occurrences using Python's IANA timezone data.
 - `youtube-transcript-api` retrieves native captions.
+- The configured gateway image provides the optional HTTP proxy, WireGuard connection, public-IP observation, and bounded reconnect control.
 - `yt-dlp`, its EJS challenge solver, Deno, and `ffmpeg` remain installed for the dormant audio-transcription implementation.
 - Python `fcntl` and util-linux `flock` coordinate scheduled runs and maintenance.
 - GitHub Actions and GitHub Container Registry build and distribute the public runtime image.

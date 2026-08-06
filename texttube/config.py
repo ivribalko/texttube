@@ -26,6 +26,11 @@ SUBSCRIPTION_STATE_DIR_NAME = "state"
 LAST_SUBSCRIPTION_WINDOW_END_FILE = "last_subscription_window_end_utc.txt"
 PENDING_NATIVE_CAPTION_FAILURES_FILE = "pending_native_caption_failures.json"
 MAX_NATIVE_CAPTION_ATTEMPTS = 3
+MAX_TRANSCRIPT_IP_ROTATIONS = 3
+VPN_ROTATION_TIMEOUT_SECONDS = 60
+VPN_ROTATION_POLL_SECONDS = 1
+TRANSCRIPT_PROXY_INTERNAL_URL = "http://vpn:8888"
+TRANSCRIPT_PROXY_CONTROL_INTERNAL_URL = "http://vpn:8000"
 GOOGLE_OAUTH_REFRESH_TOKEN_FILE = "google_oauth_refresh_token"
 TRANSCRIPT_LANGUAGE_SEPARATOR = ","
 GOOGLE_OAUTH_AUTH_COMMAND = (
@@ -40,6 +45,15 @@ GOOGLE_OAUTH_REAUTHORIZATION_MESSAGE = (
 
 
 @dataclass(frozen=True)
+class TranscriptProxyConfig:
+    """Configures a rotating transcript proxy and its private control API."""
+
+    proxy_url: str
+    control_url: str
+    control_api_key: str
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Runtime secrets and API credentials for one TextTube invocation."""
 
@@ -49,6 +63,7 @@ class AppConfig:
     google_client_id: str
     google_client_secret: str
     google_refresh_token: str
+    transcript_proxy: TranscriptProxyConfig | None
 
 
 @dataclass(frozen=True)
@@ -195,6 +210,23 @@ class ConfigLoader:
             raise FatalError(f"Missing required configuration: {key}")
         return value
 
+    @staticmethod
+    def load_transcript_proxy_config(
+        values: dict[str, str],
+    ) -> TranscriptProxyConfig | None:
+        """Enable the fixed private transcript proxy when its control key exists."""
+        control_api_key = values.get(
+            "TRANSCRIPT_PROXY_CONTROL_API_KEY",
+            "",
+        ).strip()
+        if not control_api_key:
+            return None
+        return TranscriptProxyConfig(
+            proxy_url=TRANSCRIPT_PROXY_INTERNAL_URL,
+            control_url=TRANSCRIPT_PROXY_CONTROL_INTERNAL_URL,
+            control_api_key=control_api_key,
+        )
+
     @classmethod
     def load_app_config(cls, token_path: Path) -> AppConfig:
         """Load API credentials and the protected refresh token."""
@@ -206,6 +238,7 @@ class ConfigLoader:
             google_client_id=cls.require_env(values, "GOOGLE_OAUTH_CLIENT_ID"),
             google_client_secret=cls.require_env(values, "GOOGLE_OAUTH_CLIENT_SECRET"),
             google_refresh_token=cls.read_google_refresh_token(token_path),
+            transcript_proxy=cls.load_transcript_proxy_config(values),
         )
 
     @staticmethod

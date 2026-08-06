@@ -1,20 +1,154 @@
-"""Native-caption selection and dormant audio-fallback adapter."""
+"""Native captions, rotating proxy recovery, and dormant audio fallback."""
 
 from __future__ import annotations
 
+import ipaddress
+import time
 from dataclasses import replace
 from typing import Any
 
+from texttube.config import (
+    MAX_TRANSCRIPT_IP_ROTATIONS,
+    REQUEST_TIMEOUT_SECONDS,
+    VPN_ROTATION_POLL_SECONDS,
+    VPN_ROTATION_TIMEOUT_SECONDS,
+    TranscriptProxyConfig,
+)
 from texttube.domain import NativeTranscriptUnavailable, Transcript, Video, VideoFailure
 from texttube.ports import AudioTranscription, Log
+
+
+class TranscriptProxyRotator:
+    """Reconnects a VPN proxy until a different public IP is ready."""
+
+    def __init__(self, session: Any, config: TranscriptProxyConfig, log: Log):
+        self.session = session
+        self.config = config
+        self.log = log
+        self.rejected_ips: set[str] = set()
+
+    def rotate(self) -> None:
+        """Replace the active VPN public IP or raise a per-video failure."""
+        previous_ip = self._public_ip()
+        self.rejected_ips.add(previous_ip)
+        self.log.write(
+            "transcript proxy: reconnect for a different public IP",
+            essential=True,
+        )
+        deadline = time.monotonic() + VPN_ROTATION_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            self._set_status("stopped")
+            self._wait_for_status("stopped", deadline)
+            self._set_status("running")
+            while time.monotonic() < deadline:
+                if self._status() == "running":
+                    current_ip = self._public_ip(required=False)
+                    if not current_ip:
+                        time.sleep(VPN_ROTATION_POLL_SECONDS)
+                        continue
+                    if current_ip not in self.rejected_ips:
+                        self.log.write(
+                            "transcript proxy: different public IP ready",
+                            essential=True,
+                        )
+                        return
+                    self.log.write(
+                        "transcript proxy: public IP already rejected; reconnect again",
+                        essential=True,
+                    )
+                    break
+                time.sleep(VPN_ROTATION_POLL_SECONDS)
+        raise VideoFailure(
+            "transcript proxy did not provide a different public IP before timeout"
+        )
+
+    def _wait_for_status(self, status: str, deadline: float) -> None:
+        """Wait for one gateway loop transition before requesting the next."""
+        while time.monotonic() < deadline:
+            if self._status() == status:
+                return
+            time.sleep(VPN_ROTATION_POLL_SECONDS)
+        raise VideoFailure(
+            f"transcript proxy did not transition to {status} before timeout"
+        )
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Call one authenticated VPN gateway control endpoint."""
+        url = f"{self.config.control_url}{path}"
+        try:
+            response = self.session.request(
+                method,
+                url,
+                headers={"X-API-Key": self.config.control_api_key},
+                json=payload,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            raise VideoFailure(
+                f"transcript proxy control request failed: {self.log.exception(exc)}"
+            ) from exc
+        try:
+            if response.status_code != 200:
+                raise VideoFailure(
+                    "transcript proxy control request failed with "
+                    f"HTTP {response.status_code}"
+                )
+            parsed = response.json()
+        except ValueError as exc:
+            raise VideoFailure(
+                "transcript proxy control request returned invalid JSON"
+            ) from exc
+        finally:
+            response.close()
+        if not isinstance(parsed, dict):
+            raise VideoFailure(
+                "transcript proxy control request returned unexpected JSON"
+            )
+        return parsed
+
+    def _set_status(self, status: str) -> None:
+        """Set the VPN gateway loop state."""
+        self._request_json("PUT", "/v1/vpn/status", payload={"status": status})
+
+    def _status(self) -> str:
+        """Return the normalized VPN gateway loop state."""
+        return str(self._request_json("GET", "/v1/vpn/status").get("status", ""))
+
+    def _public_ip(self, *, required: bool = True) -> str:
+        """Return the VPN gateway's public IP without writing it to logs."""
+        raw_value = self._request_json("GET", "/v1/publicip/ip").get("public_ip")
+        value = str(raw_value).strip() if raw_value is not None else ""
+        try:
+            value = str(ipaddress.ip_address(value)) if value else ""
+        except ValueError:
+            value = ""
+        if required and not value:
+            raise VideoFailure("transcript proxy did not report its current public IP")
+        return value
 
 
 class NativeTranscriptFetcher:
     """Fetches YouTube transcripts and ranks preferred language matches."""
 
-    def __init__(self, language_preferences: tuple[str, ...], log: Log):
+    def __init__(
+        self,
+        language_preferences: tuple[str, ...],
+        log: Log,
+        *,
+        proxy_config: TranscriptProxyConfig | None = None,
+        proxy_rotator: TranscriptProxyRotator | None = None,
+    ):
         self.language_preferences = language_preferences
         self.log = log
+        self.proxy_config = proxy_config
+        self.proxy_rotator = proxy_rotator
+        self.direct_ip_blocked = False
 
     @staticmethod
     def transcript_language_match_rank(
@@ -102,16 +236,89 @@ class NativeTranscriptFetcher:
         *,
         original_audio_language: str = "",
     ) -> Transcript:
-        """Fetch the first nonempty transcript in preference order."""
+        """Fetch captions directly, falling back to VPN exits after an IP block."""
+        if not self.direct_ip_blocked:
+            try:
+                return self._fetch_once(
+                    video_id,
+                    original_audio_language=original_audio_language,
+                    use_proxy=False,
+                )
+            except self._ip_block_errors() as exc:
+                if self.proxy_config is None:
+                    raise VideoFailure(
+                        f"transcript unavailable: {self.log.exception(exc)}"
+                    ) from exc
+                self.direct_ip_blocked = True
+                self.log.write(
+                    f"transcript native: direct IP blocked {video_id}; "
+                    "retry through proxy",
+                    essential=True,
+                )
+
+        return self._fetch_through_proxy(
+            video_id,
+            original_audio_language=original_audio_language,
+        )
+
+    def _fetch_through_proxy(
+        self,
+        video_id: str,
+        *,
+        original_audio_language: str = "",
+    ) -> Transcript:
+        """Fetch captions through the VPN and rotate only blocked exits."""
+        for rotation in range(MAX_TRANSCRIPT_IP_ROTATIONS + 1):
+            try:
+                return self._fetch_once(
+                    video_id,
+                    original_audio_language=original_audio_language,
+                    use_proxy=True,
+                )
+            except self._ip_block_errors() as exc:
+                if self.proxy_rotator is None or rotation >= MAX_TRANSCRIPT_IP_ROTATIONS:
+                    raise VideoFailure(
+                        f"transcript unavailable: {self.log.exception(exc)}"
+                    ) from exc
+                self.log.write(
+                    f"transcript native: IP blocked {video_id}; rotate proxy "
+                    f"{rotation + 1}/{MAX_TRANSCRIPT_IP_ROTATIONS}",
+                    essential=True,
+                )
+                self.proxy_rotator.rotate()
+        raise AssertionError("unreachable transcript proxy rotation state")
+
+    @staticmethod
+    def _ip_block_errors() -> tuple[type[Exception], ...]:
+        """Return the transcript library's explicit IP-block exception types."""
+        try:
+            from youtube_transcript_api._errors import IpBlocked, RequestBlocked
+        except ModuleNotFoundError as exc:
+            raise VideoFailure(
+                "transcript unavailable: missing Python dependency youtube-transcript-api"
+            ) from exc
+        return (RequestBlocked, IpBlocked)
+
+    def _fetch_once(
+        self,
+        video_id: str,
+        *,
+        original_audio_language: str = "",
+        use_proxy: bool,
+    ) -> Transcript:
+        """Fetch the first nonempty transcript through the selected route."""
         self.log.write(f"transcript native: list {video_id}")
         try:
             from youtube_transcript_api import YouTubeTranscriptApi
             from youtube_transcript_api._errors import (
                 CouldNotRetrieveTranscript,
+                IpBlocked,
                 NoTranscriptFound,
+                RequestBlocked,
                 TranscriptsDisabled,
                 VideoUnavailable,
             )
+            from youtube_transcript_api.proxies import GenericProxyConfig
         except ModuleNotFoundError as exc:
             raise VideoFailure(
                 "transcript unavailable: missing Python dependency youtube-transcript-api"
@@ -122,12 +329,21 @@ class NativeTranscriptFetcher:
             VideoUnavailable,
             CouldNotRetrieveTranscript,
         )
+        ip_block_errors = (RequestBlocked, IpBlocked)
         try:
-            transcript_api = YouTubeTranscriptApi()
+            library_proxy_config = None
+            if use_proxy and self.proxy_config is not None:
+                library_proxy_config = GenericProxyConfig(
+                    http_url=self.proxy_config.proxy_url,
+                    https_url=self.proxy_config.proxy_url,
+                )
+            transcript_api = YouTubeTranscriptApi(proxy_config=library_proxy_config)
             if hasattr(transcript_api, "list"):
                 transcript_list = transcript_api.list(video_id)
             else:
                 transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        except ip_block_errors:
+            raise
         except transcript_errors as exc:
             raise VideoFailure(
                 f"transcript unavailable: {self.log.exception(exc)}"
@@ -188,6 +404,8 @@ class NativeTranscriptFetcher:
                         f"chars={len(text)} lines={len(lines)}"
                     )
                     return Transcript(text=text, language_code=language_code)
+            except ip_block_errors:
+                raise
             except transcript_errors as exc:
                 last_error = exc
             except Exception as exc:
@@ -197,6 +415,7 @@ class NativeTranscriptFetcher:
                 f"transcript unavailable: {self.log.exception(last_error)}"
             ) from last_error
         raise VideoFailure("transcript unavailable: transcript was empty")
+
 
 class TranscriptResolver:
     """Resolves native-caption transcripts with dormant audio code."""
