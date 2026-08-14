@@ -208,7 +208,6 @@ class OpenAISummarizer:
             self.log.write(
                 f"summary: duration video={video_id} source={source} "
                 f"model={OPENAI_SUMMARY_MODEL}: elapsed={elapsed:.1f}s",
-                essential=True,
             )
 
     @staticmethod
@@ -346,7 +345,6 @@ class OpenAIAudioTranscriber:
             duration = time.perf_counter() - started_at
             self.log.write(
                 f"transcript audio: duration {video_id}: {duration:.1f}s",
-                essential=True,
             )
 
     def _transcribe_chunks(self, chunk_paths: list[Path]) -> str:

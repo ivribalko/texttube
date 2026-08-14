@@ -38,7 +38,6 @@ services:
       TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID is required}"
       TEXTTUBE_HOME: /data
       TEXTTUBE_LIMIT: "${TEXTTUBE_LIMIT:-}"
-      TEXTTUBE_VERBOSE: "${TEXTTUBE_VERBOSE:-}"
       TRANSCRIPT_LANGUAGES: "${TRANSCRIPT_LANGUAGES:-}"
       TZ: "${TZ:-UTC}"
     healthcheck:

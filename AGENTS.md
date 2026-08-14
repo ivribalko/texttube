@@ -50,11 +50,10 @@ Run one selected video by passing its URL or ID after the service name:
 docker compose --env-file .env \
   --file compose.yaml --file compose.local.yaml \
   run --build --rm texttube app \
-  --video "https://www.youtube.com/watch?v=VIDEO_ID" \
-  --verbose
+  --video "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
-Append application arguments such as `--video URL_OR_ID`, `--limit N`, or `--verbose` after `app`. The local override preserves the Compose-managed environment and data volume while replacing the published image with a build from the current source. Manual-run output remains in the live terminal, and `--rm` removes the container when it exits.
+Append application arguments such as `--video URL_OR_ID` or `--limit N` after `app`. The local override preserves the Compose-managed environment and data volume while replacing the published image with a build from the current source. Manual-run output remains in the live terminal, and `--rm` removes the container when it exits.
 
 ## Subscription Cutoff
 

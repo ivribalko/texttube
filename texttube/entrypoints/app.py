@@ -59,11 +59,6 @@ def parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
         metavar="URL_OR_ID",
         help="process one YouTube video instead of subscriptions",
     )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="show detailed progress and errors",
-    )
     return parser.parse_args(arguments)
 
 
@@ -82,7 +77,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     """Construct adapters, execute one application run, and map failures to exits."""
     paths = RuntimePaths.discover()
     try:
-        log = ConsoleLog(verbose=False, log_dir=paths.log_dir())
+        log = ConsoleLog(log_dir=paths.log_dir())
     except OSError as exc:
         print(f"TextTube could not initialize its run log: {exc}", file=sys.stderr)
         return 1
@@ -93,10 +88,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
     try:
         log.write(
             f"run log: {paths.display_path(log.path)}",
-            essential=True,
         )
         options = ConfigLoader.load_runtime_options(parse_args(arguments))
-        log.verbose = options.verbose
         log.write("startup: parse args")
         log.write("startup: load config")
         config = ConfigLoader.load_app_config(paths.google_refresh_token_path())
@@ -164,13 +157,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
             log,
         )
 
-        log.write("startup: load prompt", essential=True)
+        log.write("startup: load prompt")
         log.write(f"prompt: {paths.display_path(prompt_path)}")
         log.write(f"openai: summary={OPENAI_SUMMARY_MODEL} transcription=disabled")
         if config.transcript_proxy is not None:
             log.write(
                 "transcript proxy: enabled with automatic IP rotation",
-                essential=True,
             )
         if options.transcript_languages:
             log.write(
@@ -183,16 +175,15 @@ def main(arguments: Sequence[str] | None = None) -> int:
             application.run_subscriptions(options.limit)
         return 0
     except KeyboardInterrupt:
-        log.write("interrupt: shutting down", essential=True)
+        log.write("interrupt: shutting down")
         return 130
     except FatalError as exc:
-        log.write(f"fatal: {exc}", essential=True)
+        log.write(f"fatal: {exc}")
         _notify_run_failure(delivery, exc, log)
         return 1
     except Exception as exc:
         log.write(
             f"fatal: unexpected error: {log.exception(exc)}",
-            essential=True,
         )
         _notify_run_failure(delivery, exc, log)
         return 1
@@ -215,10 +206,10 @@ def _notify_run_failure(
             auth_command=GOOGLE_OAUTH_AUTH_COMMAND
         )
     try:
-        log.write("run failure: send telegram", essential=True)
+        log.write("run failure: send telegram")
         delivery.send_notice(message)
     except Exception:
-        log.write("telegram run failure notification failed", essential=True)
+        log.write("telegram run failure notification failed")
 
 
 if __name__ == "__main__":

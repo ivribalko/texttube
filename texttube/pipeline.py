@@ -69,12 +69,11 @@ class VideoPipeline:
     def process(self, video: Video) -> VideoOutcome:
         """Process one video through the complete core use case."""
         if self.is_probable_short(video):
-            self.log.write(f"skip {video.video_id}: Short", essential=True)
+            self.log.write(f"skip {video.video_id}: Short")
             return VideoOutcome(video_id=video.video_id, status=VideoStatus.SKIPPED)
 
         self.log.write(
             f"process {video.video_id}: {video.channel_title}: {video.title}",
-            essential=True,
         )
         summary = self._summarize(video)
         return self._deliver(video, summary)
@@ -86,7 +85,7 @@ class VideoPipeline:
     def _deliver(self, video: Video, summary: Summary) -> VideoOutcome:
         """Deliver one prepared summary and return its successful outcome."""
         self.log.write(f"process {video.video_id}: format message")
-        self.log.write(f"process {video.video_id}: send telegram", essential=True)
+        self.log.write(f"process {video.video_id}: send telegram")
         self.delivery.deliver(video, summary)
         result_label = {
             SummarySource.TRANSCRIPT: "summarized",
@@ -111,21 +110,18 @@ class VideoPipeline:
             self.log.write(
                 f"process {video.video_id}: native transcript unavailable: "
                 f"{self.log.exception(exc)}",
-                essential=True,
             )
             raise
         except VideoFailure as exc:
             self.log.write(
                 f"process {video.video_id}: transcript retrieval error, "
                 f"using description: {self.log.exception(exc)}",
-                essential=True,
             )
             return self._summarize_description(video)
         except Exception as exc:
             self.log.write(
                 f"process {video.video_id}: unexpected transcript error, "
                 f"using description: {self.log.exception(exc)}",
-                essential=True,
             )
             return self._summarize_description(video)
 
@@ -134,7 +130,6 @@ class VideoPipeline:
                 f"process {video.video_id}: summarize transcript "
                 f"language={transcript.language_code or 'unknown'} "
                 f"chars={len(transcript.text)} lines={len(transcript.text.splitlines())}",
-                essential=True,
             )
             return Summary(
                 text=self.summarization.summarize_transcript(video, transcript),
@@ -144,13 +139,11 @@ class VideoPipeline:
             self.log.write(
                 f"process {video.video_id}: transcript summary unavailable, "
                 f"using description: {self.log.exception(exc)}",
-                essential=True,
             )
         except Exception as exc:
             self.log.write(
                 f"process {video.video_id}: unexpected summary error, using description: "
                 f"{self.log.exception(exc)}",
-                essential=True,
             )
         return self._summarize_description(video)
 
@@ -158,7 +151,6 @@ class VideoPipeline:
         """Create a labeled description summary or an unavailable result."""
         self.log.write(
             f"process {video.video_id}: summarize description fallback",
-            essential=True,
         )
         try:
             return Summary(
@@ -169,7 +161,6 @@ class VideoPipeline:
             self.log.write(
                 f"process {video.video_id}: description summary unavailable: "
                 f"{self.log.exception(exc)}",
-                essential=True,
             )
             return Summary(
                 text=SUMMARY_UNAVAILABLE_MESSAGE,
@@ -179,7 +170,6 @@ class VideoPipeline:
             self.log.write(
                 f"process {video.video_id}: unexpected description summary error: "
                 f"{self.log.exception(exc)}",
-                essential=True,
             )
             return Summary(
                 text=SUMMARY_UNAVAILABLE_MESSAGE,
@@ -208,28 +198,27 @@ class ApplicationPipeline:
 
     def run_single_video(self, video_id: str) -> RunOutcome:
         """Process one selected video without advancing subscription state."""
-        self.log.write(f"single video mode: {video_id}", essential=True)
-        self.log.write("startup: resolve youtube token", essential=True)
+        self.log.write(f"single video mode: {video_id}")
+        self.log.write("startup: resolve youtube token")
         video = self.discovery.fetch_video(video_id)
         outcome = self._attempt_video(video)
         delivered_count = int(outcome is not None and outcome.delivered)
-        self.log.write(f"sent messages: {delivered_count}", essential=True)
+        self.log.write(f"sent messages: {delivered_count}")
         return RunOutcome(delivered_count=delivered_count)
 
     def run_subscriptions(self, limit: int) -> RunOutcome:
         """Process the current subscription window and persist its completion."""
-        self.log.write("startup: resolve youtube token", essential=True)
+        self.log.write("startup: resolve youtube token")
         self.discovery.ensure_authorized()
         window_start, window_end = self.state.subscription_window()
         self.log.write(
             f"subscription window utc: {window_start.isoformat()} -> {window_end.isoformat()}",
-            essential=True,
         )
 
         sent_count, attempted_video_ids, stopped_by_limit = self._retry_pending_captions(
             limit
         )
-        self.log.write("subscriptions mode: iterate recent videos", essential=True)
+        self.log.write("subscriptions mode: iterate recent videos")
         items = (
             ()
             if stopped_by_limit
@@ -263,14 +252,13 @@ class ApplicationPipeline:
         ):
             self.log.write(
                 f"limit reached: send telegram for {sent_count} messages",
-                essential=True,
             )
             self.delivery.send_notice(
                 "TextTube stopped after reaching the "
                 f"{self.policy.default_video_limit}-video limit for this run."
             )
         self.state.complete_window(window_end)
-        self.log.write(f"sent messages: {sent_count}", essential=True)
+        self.log.write(f"sent messages: {sent_count}")
         return RunOutcome(
             delivered_count=sent_count,
             stopped_by_limit=stopped_by_limit,
@@ -287,7 +275,6 @@ class ApplicationPipeline:
         if pending_failures:
             self.log.write(
                 f"pending native captions: retry {len(pending_failures)}",
-                essential=True,
             )
         for failure in pending_failures:
             if limit > 0 and sent_count >= limit:
@@ -307,20 +294,17 @@ class ApplicationPipeline:
         except NativeTranscriptUnavailable as exc:
             self.log.write(
                 f"native captions failed {video.video_id}: {self.log.exception(exc)}",
-                essential=True,
             )
             return self._record_caption_failure(video)
         except DeliveryFailure as exc:
             self.log.write(
                 f"telegram delivery failed {video.video_id}: {self.log.exception(exc)}",
-                essential=True,
             )
             self.state.complete_caption_retry(video.video_id)
             return None
         except VideoFailure as exc:
             self.log.write(
                 f"failed to process {video.video_id}: {self.log.exception(exc)}",
-                essential=True,
             )
             self.state.complete_caption_retry(video.video_id)
             return None
@@ -328,7 +312,6 @@ class ApplicationPipeline:
             self.log.write(
                 f"failed to process {video.video_id}: unexpected error: "
                 f"{self.log.exception(exc)}",
-                essential=True,
             )
             self.state.complete_caption_retry(video.video_id)
             return None
@@ -340,13 +323,11 @@ class ApplicationPipeline:
         attempts = self.state.record_caption_failure(video.video_id)
         self.log.write(
             f"pending native captions {video.video_id}: failed attempt {attempts}",
-            essential=True,
         )
         if attempts < self.policy.max_native_caption_attempts:
             return None
         self.log.write(
             f"native captions exhausted {video.video_id}: use description",
-            essential=True,
         )
         try:
             return self.videos.process_description_fallback(video)
@@ -354,14 +335,12 @@ class ApplicationPipeline:
             self.log.write(
                 f"telegram delivery failed {video.video_id}: "
                 f"{self.log.exception(exc)}",
-                essential=True,
             )
             return None
         except Exception as exc:
             self.log.write(
                 f"description fallback failed {video.video_id}: "
                 f"{self.log.exception(exc)}",
-                essential=True,
             )
             return None
 
@@ -369,7 +348,6 @@ class ApplicationPipeline:
         """Log and notify about one skipped subscription channel."""
         self.log.write(
             f"channel {failure.channel_title}: uploads unavailable: {failure.detail}",
-            essential=True,
         )
         try:
             self.delivery.send_notice(
@@ -381,5 +359,4 @@ class ApplicationPipeline:
             self.log.write(
                 f"channel {failure.channel_title}: telegram notice failed: "
                 f"{self.log.exception(exc)}",
-                essential=True,
             )

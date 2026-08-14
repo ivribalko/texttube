@@ -33,7 +33,6 @@ class TranscriptProxyRotator:
         self.rejected_ips.add(previous_ip)
         self.log.write(
             "transcript proxy: reconnect for a different public IP",
-            essential=True,
         )
         deadline = time.monotonic() + VPN_ROTATION_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
@@ -49,12 +48,10 @@ class TranscriptProxyRotator:
                     if current_ip not in self.rejected_ips:
                         self.log.write(
                             "transcript proxy: different public IP ready",
-                            essential=True,
                         )
                         return
                     self.log.write(
                         "transcript proxy: public IP already rejected; reconnect again",
-                        essential=True,
                     )
                     break
                 time.sleep(VPN_ROTATION_POLL_SECONDS)
@@ -253,7 +250,6 @@ class NativeTranscriptFetcher:
                 self.log.write(
                     f"transcript native: direct IP blocked {video_id}; "
                     "retry through proxy",
-                    essential=True,
                 )
 
         return self._fetch_through_proxy(
@@ -283,7 +279,6 @@ class NativeTranscriptFetcher:
                 self.log.write(
                     f"transcript native: IP blocked {video_id}; rotate proxy "
                     f"{rotation + 1}/{MAX_TRANSCRIPT_IP_ROTATIONS}",
-                    essential=True,
                 )
                 self.proxy_rotator.rotate()
         raise AssertionError("unreachable transcript proxy rotation state")
@@ -439,7 +434,7 @@ class TranscriptResolver:
         """Resolve a transcript while honoring the core's audio decision."""
         try:
             self.log.write(
-                f"process {video.video_id}: native transcript", essential=True
+                f"process {video.video_id}: native transcript"
             )
             result = self.native.fetch(
                 video.video_id,

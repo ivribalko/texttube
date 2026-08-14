@@ -76,8 +76,8 @@ class State(Protocol):
 
 
 class Log(Protocol):
-    """Writes operator logs while controlling sensitive exception detail."""
+    """Writes all operator logs and formats exception detail."""
 
-    def write(self, message: str, *, essential: bool = False) -> None: ...
+    def write(self, message: str) -> None: ...
 
     def exception(self, error: Exception) -> str: ...

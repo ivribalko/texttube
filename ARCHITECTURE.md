@@ -82,7 +82,7 @@ In `serve` mode, authorization maintenance starts first. Scheduling starts after
 
 Application output, scheduler messages, and authorization instructions remain visible on container stdout and stderr. Each scheduled or manual `app` invocation also writes its visible application output to a UTC-timestamped file in the managed volume. App startup removes run logs that are 30 days old or older. Manual runs remain attached and are removed by the documented `--rm` workflow without removing their volume-backed run logs.
 
-Verbose application logging records the summary source, language hint, input and prompt fingerprints, model output, duration, and failures. Transcript and description input text and credentials are never logged.
+Application logging records all progress and error messages, including the summary source, language hint, input and prompt fingerprints, model output, duration, and failure details. Transcript and description input text and credentials are never logged.
 
 The managed paths are:
 
@@ -108,7 +108,7 @@ Local source runs use the Git-ignored repository-root `.env` file through `compo
 
 Automatic VPN rotation additionally requires the gateway image, provider identifier, WireGuard key, and control key in the ignored deployment environment. Compose maps the control key into the application, where a nonempty value enables fixed private proxy and control endpoints. TextTube never logs an endpoint, provider, control key, WireGuard key, or VPN public IP.
 
-`CRON` is required by `serve` and `scheduler` modes but ignored by manual `app` and `auth` commands. `TZ` is an IANA timezone for cron evaluation and container-local log timestamps; Compose defaults it to `UTC`. Subscription boundaries and run-log filenames remain in UTC. `TRANSCRIPT_LANGUAGES` controls native-caption preference order and acceptable transcript-summary languages. `TEXTTUBE_LIMIT` and `TEXTTUBE_VERBOSE` provide application defaults. `SUMMARIZER_MD` selects the summary prompt document outside the packaged Compose workflow.
+`CRON` is required by `serve` and `scheduler` modes but ignored by manual `app` and `auth` commands. `TZ` is an IANA timezone for cron evaluation and container-local log timestamps; Compose defaults it to `UTC`. Subscription boundaries and run-log filenames remain in UTC. `TRANSCRIPT_LANGUAGES` controls native-caption preference order and acceptable transcript-summary languages. `TEXTTUBE_LIMIT` provides the application limit default. `SUMMARIZER_MD` selects the summary prompt document outside the packaged Compose workflow.
 
 Google credentials must use application type `TVs and Limited Input devices`. Authorization exchanges the stored refresh token for an access token at startup and hourly. A valid token updates container health readiness. A missing or rejected token triggers Google’s YouTube read-only device flow, prints only the verification URL and user code, polls at Google’s required interval, and atomically stores the replacement token with owner-only permissions. The refresh token is never printed or exposed through a Compose environment variable.
 
@@ -182,7 +182,7 @@ The scheduler:
 - Native-caption retrieval failures persist the video ID through attempt two. Other expected per-video failures use the description fallback or allow later videos to continue without persistence.
 - Fatal failures after Telegram construction trigger a run-level notice.
 - Google OAuth `invalid_grant` produces a reauthorization-specific notice and preserves the subscription window.
-- Error details are hidden unless verbose logging is enabled.
+- Error details are included in application logs.
 - Application `SIGINT` and `SIGTERM` close shared clients and return exit code `130`.
 - Invalid scheduler configuration exits with code `2`.
 - Authorization readiness is removed before replacement authorization, after failed validation, and during shutdown. Transient failures retry after one minute.

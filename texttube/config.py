@@ -72,7 +72,6 @@ class RuntimeOptions:
 
     limit: int
     video_id: str | None
-    verbose: bool
     transcript_languages: tuple[str, ...]
 
 
@@ -186,12 +185,6 @@ class ConfigLoader:
     """Loads process configuration and the volume-backed Google refresh token."""
 
     @staticmethod
-    def parse_optional_bool(values: dict[str, str], key: str) -> bool | None:
-        """Parse the optional lowercase true flag used by Compose."""
-        raw_value = values.get(key, "").strip()
-        return None if not raw_value else raw_value == "true"
-
-    @staticmethod
     def parse_optional_int(values: dict[str, str], key: str) -> int | None:
         """Parse one optional integer environment value."""
         raw_value = values.get(key, "").strip()
@@ -287,13 +280,10 @@ class ConfigLoader:
             limit = configured_limit if configured_limit is not None else DEFAULT_VIDEO_LIMIT
         if limit < 0:
             raise FatalError("--limit must be 0 or greater")
-        configured_verbose = cls.parse_optional_bool(values, "TEXTTUBE_VERBOSE")
-        verbose = args.verbose or bool(configured_verbose)
         video_id = ValueParser.parse_youtube_video_id(args.video) if args.video else None
         return RuntimeOptions(
             limit=limit,
             video_id=video_id,
-            verbose=verbose,
             transcript_languages=cls.parse_transcript_languages(
                 values.get("TRANSCRIPT_LANGUAGES", "").strip()
             ),

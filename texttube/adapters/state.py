@@ -23,10 +23,9 @@ from texttube.domain import FatalError, PendingCaptionFailure
 
 
 class ConsoleLog:
-    """Writes concise operator logs to stderr and an optional run file."""
+    """Writes all operator logs to stderr and an optional run file."""
 
-    def __init__(self, verbose: bool, log_dir: Path | None = None):
-        self.verbose = verbose
+    def __init__(self, log_dir: Path | None = None):
         self.path: Path | None = None
         self._file = None
         if log_dir is not None:
@@ -36,10 +35,8 @@ class ConsoleLog:
             self._file = self.path.open("x", encoding="utf-8")
             self._remove_expired_logs(log_dir)
 
-    def write(self, message: str, *, essential: bool = False) -> None:
-        """Write a timestamped message when its configured level is visible."""
-        if not self.verbose and not essential:
-            return
+    def write(self, message: str) -> None:
+        """Write a timestamped message to every configured output."""
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
         print(line, file=sys.stderr, flush=True)
@@ -57,10 +54,8 @@ class ConsoleLog:
             log_file.close()
 
     def exception(self, error: Exception) -> str:
-        """Return safe exception detail for the active verbosity level."""
-        if self.verbose:
-            return str(error) or error.__class__.__name__
-        return "error details hidden; run with --verbose to show the full exception"
+        """Return available exception detail for logging."""
+        return str(error) or error.__class__.__name__
 
     def _remove_expired_logs(self, log_dir: Path) -> None:
         """Remove application logs that reached the retention boundary."""
@@ -76,7 +71,6 @@ class ConsoleLog:
             except OSError as exc:
                 self.write(
                     f"run log retention failed for {path.name}: {exc}",
-                    essential=True,
                 )
 
     def _disable_file_logging(self, error: Exception) -> None:
@@ -269,11 +263,10 @@ class ApplicationLifecycle:
             except Exception as exc:
                 self.log.write(
                     f"cleanup: {name}: {self.log.exception(exc)}",
-                    essential=True,
                 )
 
     def _handle_signal(self, signum: int, _frame: Any) -> None:
         """Convert termination signals into the CLI interrupt path."""
         signal_name = signal.Signals(signum).name
-        self.log.write(f"interrupt: received {signal_name}", essential=True)
+        self.log.write(f"interrupt: received {signal_name}")
         raise KeyboardInterrupt
