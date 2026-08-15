@@ -27,14 +27,12 @@ texttube/
 │   ├── google_auth.py
 │   ├── openai.py
 │   ├── scheduler.py
-│   ├── service.py
 │   ├── state.py
 │   ├── telegram.py
 │   ├── transcripts.py
 │   └── youtube.py
 └── entrypoints/
     ├── app.py
-    ├── auth.py
     ├── scheduler.py
     └── service.py
 ```
@@ -44,7 +42,7 @@ texttube/
 - `pipeline.py` contains readable application and per-video orchestration.
 - `config.py` owns constants, environment loading, normalized runtime options, value parsing, and runtime path discovery.
 - `adapters/` contains every OpenAI, YouTube, Google OAuth, Telegram, HTTP, filesystem, cron, and subprocess implementation.
-- `entrypoints/` contains the executable `app`, `auth`, `scheduler`, and `service` process surfaces. These modules parse commands, construct dependencies, and are launched with `python -m`.
+- `entrypoints/` contains the executable `app`, `scheduler`, and `service` process surfaces. These modules parse commands, construct dependencies, and are launched with `python -m`.
 - `SUMMARIZER.md` defines transcript and description summary input and output behavior.
 - `Dockerfile` builds the shared Linux image.
 - `compose.yaml` defines the published-image service, managed volume, and optional generic VPN profile.
@@ -70,15 +68,13 @@ The optional `vpn` profile adds a gateway on the private Compose network. The ga
 
 The container entrypoint accepts these modes:
 
-- `serve` runs authorization maintenance and the cron scheduler under one supervisor. This is the Compose default.
+- `serve` runs the cron scheduler. This is the Compose default.
 - `app` performs one manual subscription or selected-video run.
-- `auth --once` validates or replaces authorization and exits.
 - `scheduler` runs the scheduler alone for diagnostics.
-- `healthcheck` reports whether the stored refresh token was validated recently.
 
-The image starts `texttube.entrypoints.service` as a Python module. The scheduler launches `texttube.entrypoints.app` the same way, and the Compose healthcheck invokes `texttube.entrypoints.auth` directly. These package modules are the only process launch surfaces.
+The image starts `texttube.entrypoints.service` as a Python module. The scheduler launches `texttube.entrypoints.app` the same way. These package modules are the only process launch surfaces.
 
-In `serve` mode, authorization maintenance starts first. Scheduling starts after the first successful token validation, matching the former Compose health dependency. Both workers share shutdown state. If either worker exits unexpectedly, the supervisor stops the other and exits nonzero so the container restart policy can recover. Scheduler application runs remain isolated subprocesses, and signals are forwarded to an active subprocess.
+In `serve` mode, container startup validates Google authorization once before scheduling begins. Missing or rejected authorization uses the same Telegram device flow as an application run and gates scheduler startup until approval. No background authorization worker or recurring authorization health probe runs after startup. Scheduler application runs remain isolated subprocesses, and signals are forwarded to an active subprocess.
 
 Application output, scheduler messages, and authorization instructions remain visible on container stdout and stderr. Each scheduled or manual `app` invocation also writes its visible application output to a UTC-timestamped file in the managed volume. App startup removes run logs that are 30 days old or older. Manual runs remain attached and are removed by the documented `--rm` workflow without removing their volume-backed run logs.
 
@@ -108,9 +104,9 @@ Local source runs use the Git-ignored repository-root `.env` file through `compo
 
 Automatic VPN rotation additionally requires the gateway image, provider identifier, WireGuard key, and control key in the ignored deployment environment. Compose maps the control key into the application, where a nonempty value enables fixed private proxy and control endpoints. TextTube never logs an endpoint, provider, control key, WireGuard key, or VPN public IP.
 
-`CRON` is required by `serve` and `scheduler` modes but ignored by manual `app` and `auth` commands. `TZ` is an IANA timezone for cron evaluation and container-local log timestamps; Compose defaults it to `UTC`. Subscription boundaries and run-log filenames remain in UTC. `TRANSCRIPT_LANGUAGES` controls native-caption preference order and acceptable transcript-summary languages. `TEXTTUBE_LIMIT` provides the application limit default. `SUMMARIZER_MD` selects the summary prompt document outside the packaged Compose workflow.
+`CRON` is required by `serve` and `scheduler` modes but ignored by manual `app` commands. `TZ` is an IANA timezone for cron evaluation and container-local log timestamps; Compose defaults it to `UTC`. Subscription boundaries and run-log filenames remain in UTC. `TRANSCRIPT_LANGUAGES` controls native-caption preference order and acceptable transcript-summary languages. `TEXTTUBE_LIMIT` provides the application limit default. `SUMMARIZER_MD` selects the summary prompt document outside the packaged Compose workflow.
 
-Google credentials must use application type `TVs and Limited Input devices`. Authorization exchanges the stored refresh token for an access token at startup and hourly. A valid token updates container health readiness. A missing or rejected token triggers Google’s YouTube read-only device flow, prints only the verification URL and user code, polls at Google’s required interval, and atomically stores the replacement token with owner-only permissions. The refresh token is never printed or exposed through a Compose environment variable.
+Google credentials must use application type `TVs and Limited Input devices`. Container `serve` startup and every application run exchange the stored refresh token for an access token before continuing. A missing, expired, or revoked token starts Google’s YouTube read-only device flow and sends one Telegram notice containing the direct verification URL, a copyable inline-code device code, and the TTL returned by Google. The process polls Google at the required interval, atomically stores the approved replacement token with owner-only permissions, validates it, and continues its original work. If the code reaches its TTL without approval, the process sends a Telegram expiration notice and exits without requesting a replacement. The refresh token is never printed or exposed through a Compose environment variable.
 
 ## Application Components
 
@@ -124,7 +120,7 @@ Google credentials must use application type `TVs and Limited Input devices`. Au
 - `OpenAISummarizer` uses the official OpenAI Python SDK and Responses API with `gpt-5.6-luna`. Summary requests use `store: false`.
 - `TelegramDelivery` formats HTML-safe messages, truncates them to Telegram limits, disables link previews, and sends run notices.
 - `FileSubscriptionState`, `ConsoleLog`, and `ApplicationLifecycle` adapt filesystem and process concerns. Native-caption retry state is atomically replaced after each change. `ConsoleLog` tees visible application output to stderr and one timestamped run file, pruning files at the 30-day retention boundary when an app run starts.
-- `AuthorizationService`, `CronScheduler`, and `StackService` provide authorization maintenance, isolated scheduling, and single-container supervision.
+- `CronScheduler` provides isolated scheduling, while container and application startup share the device-authorization gate.
 
 ## Per-Video Flow
 
@@ -181,11 +177,10 @@ The scheduler:
 - YouTube `playlistNotFound` and `playlistOperationUnsupported` errors for an individual subscription channel produce a Telegram notice and allow remaining channels to continue.
 - Native-caption retrieval failures persist the video ID through attempt two. Other expected per-video failures use the description fallback or allow later videos to continue without persistence.
 - Fatal failures after Telegram construction trigger a run-level notice.
-- Google OAuth `invalid_grant` produces a reauthorization-specific notice and preserves the subscription window.
+- Missing Google OAuth authorization or an `invalid_grant` response starts device authorization, sends its direct verification URL, copyable code, and Google-provided TTL through Telegram, and pauses startup until Google returns a refresh token. Code expiration and shutdown signals stop the wait, expiration sends a Telegram notice, and subscription state remains untouched while waiting. The run never requests a replacement code.
 - Error details are included in application logs.
 - Application `SIGINT` and `SIGTERM` close shared clients and return exit code `130`.
 - Invalid scheduler configuration exits with code `2`.
-- Authorization readiness is removed before replacement authorization, after failed validation, and during shutdown. Transient failures retry after one minute.
 
 ## External Dependencies
 

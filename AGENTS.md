@@ -6,7 +6,7 @@
 - Keep `SUMMARIZER.md` limited to the transcript and description summary prompt contracts.
 - Keep Markdown synchronized with behavior changes without duplicating one topic across several files.
 - Keep top-of-file source comments aligned with each file’s architectural role without restating detailed behavior.
-- Use one Docker Compose service for authorization maintenance, scheduled runs, and explicit manual commands.
+- Use one Docker Compose service for scheduled and explicit application runs.
 - Keep `compose.yaml` deployable by itself with the public image, environment variables, and a named data volume.
 - Keep scheduler implementation in `texttube/adapters/scheduler.py` and dependency construction in `texttube/entrypoints/scheduler.py`.
 - Keep Compose pinned to the public `ghcr.io/ivribalko/texttube:latest` image.
@@ -28,15 +28,7 @@
 
 ## Manual Run
 
-Authorize YouTube with the current repository source after configuring the required environment variables:
-
-```sh
-docker compose --env-file .env \
-  --file compose.yaml --file compose.local.yaml \
-  run --build --rm texttube auth --once
-```
-
-Build and run the current repository source after completing Google authorization:
+Build and run the current repository source after configuring the required environment variables. The application handles Google authorization during startup when required:
 
 ```sh
 docker compose --env-file .env \
@@ -71,6 +63,6 @@ The command waits for an active scheduled run to finish before deleting its save
 - Do not run Python commands on the host; run every Python workflow inside Docker.
 - Build with `docker build --tag texttube:check .` before Python validation.
 - Compile image sources with `docker run --rm --entrypoint python texttube:check -m compileall -q /app`.
-- Validate authorization health states, scheduler cron parsing, and Compose interpolation without rendering secrets.
+- Validate run-start authorization handling, scheduler cron parsing, and Compose interpolation without rendering secrets.
 - Use a representative manual run only when the user explicitly requests application execution.
 - Before committing, run `git diff --check` and inspect the staged diff for credentials or personal data.

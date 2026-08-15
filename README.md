@@ -26,25 +26,23 @@ In the [Google Cloud console](https://console.cloud.google.com/):
 
 [Desktop-app OAuth credentials do not work with the device authorization service](https://developers.google.com/youtube/v3/guides/auth/devices).
 
-## Start and Authorize YouTube
+## Start
 
-Start the stack from the directory containing the deployed `compose.yaml`. On first startup, keep Compose attached so the authorization URL and device code remain visible:
+Start the scheduler from the directory containing the deployed `compose.yaml`:
 
 ```sh
-docker compose up --pull always
+docker compose up --detach --pull always
 ```
 
-The unified `texttube` service checks the managed volume for a refresh token. When the token is missing, expired, or revoked, it prints Google’s verification URL and device code and polls for approval. Open the URL on any phone or computer, enter the displayed code, and approve YouTube read-only access.
+Container startup validates authorization once before the scheduler begins. Every scheduled or manual application run validates it again at the beginning of that run. If the token is missing, expired, or revoked, the current process starts Google device authorization and sends one Telegram message containing the direct verification URL, a tap-to-copy code, and Google’s TTL for that code. Approve the code from the link; the waiting process stores the replacement token and continues. If the code expires, the process sends a Telegram expiration message and exits without requesting a replacement. Authorization is not polled between these checks.
 
-The service starts scheduling after authorization becomes healthy. Approval stores the refresh token with owner-only permissions in the managed `texttube-data` volume. The refresh token is never printed or placed in a Compose environment variable.
-
-Deployment interfaces that start Compose in the background must expose the service log so the URL and code can be read. Follow it from a separate shell when the Compose file is available:
+Follow scheduler and application output when needed:
 
 ```sh
 docker compose logs --follow texttube
 ```
 
-The service validates the refresh token when it starts and once per hour. A failed validation makes `texttube` unhealthy and automatically prints a new device login. Google authorizations for external apps left in [Testing status expire after seven days](https://support.google.com/cloud/answer/15549945). Production refresh tokens have [no single fixed lifetime](https://developers.google.com/identity/protocols/oauth2#expiration); Google lists revocation, six months without use, time-limited access, and token-count limits among the reasons they can stop working.
+Google authorizations for external apps left in [Testing status expire after seven days](https://support.google.com/cloud/answer/15549945). Production refresh tokens have [no single fixed lifetime](https://developers.google.com/identity/protocols/oauth2#expiration); Google lists revocation, six months without use, time-limited access, and token-count limits among the reasons they can stop working.
 
 No callback port, public domain, workstation helper, repository checkout, or `compose.local.yaml` is required on the server.
 
@@ -91,14 +89,6 @@ The proxy and control ports remain private to the Compose network and must not b
 
 Keep local Compose configuration in a repository-root `.env` file. The file is ignored by Git, and `compose.local.yaml` requires and loads it for containers built from the current source. Define the required credentials listed under [Requirements](#requirements), plus `CRON` when running the default `serve` mode. Set `TZ` to an IANA timezone name when scheduling should use a timezone other than UTC.
 
-Authorize YouTube with the current source:
-
-```sh
-docker compose --env-file .env \
-  --file compose.yaml --file compose.local.yaml \
-  run --build --rm texttube auth --once
-```
-
 Run one subscription pass with the current source:
 
 ```sh
@@ -142,12 +132,6 @@ Run without the default 100-message limit:
 docker compose run --rm texttube app --limit 0
 ```
 
-Validate or replace Google authorization in a one-off container:
-
-```sh
-docker compose run --rm texttube auth --once
-```
-
 ## Logs
 
 Authorization, scheduler, and scheduled application output share the `texttube` service’s standard streams. Follow them with timestamps:
@@ -170,7 +154,7 @@ Manual `app` and `auth` runs still write directly to their attached terminal. Th
 
 Compose supplies application values through the process environment. Command-line flags override overlapping runtime defaults. `TEXTTUBE_HOME` is fixed at `/data`, and the built-in `SUMMARIZER.md` is used.
 
-`CRON` is required by the default `serve` mode but is ignored by manual application and authorization commands. It must be a standard five-field cron expression; shortcuts such as `@daily` are not accepted. `TZ` selects the IANA timezone used to evaluate the expression and defaults to `UTC`. Set `TZ=<IANA_TIMEZONE>` to schedule in the chosen timezone and follow any daylight-saving transitions defined for it. Visible application log timestamps also follow the container timezone, while subscription state and run-log filenames remain in UTC.
+`CRON` is required by the default `serve` mode but is ignored by manual application commands. It must be a standard five-field cron expression; shortcuts such as `@daily` are not accepted. `TZ` selects the IANA timezone used to evaluate the expression and defaults to `UTC`. Set `TZ=<IANA_TIMEZONE>` to schedule in the chosen timezone and follow any daylight-saving transitions defined for it. Visible application log timestamps also follow the container timezone, while subscription state and run-log filenames remain in UTC.
 
 `TRANSCRIPT_LANGUAGES` is an ordered, comma-separated list. When YouTube's default audio language belongs to that list, its native captions are attempted first; otherwise configured order is preserved. Captions in every other available language follow. YouTube's caption or default-audio language code is passed to transcript summarization when available. A transcript already in one of the configured languages is summarized in the same language; for any other transcript language, the model chooses the most appropriate configured language and translates the summary into it. Audio transcription is disabled.
 
@@ -206,7 +190,7 @@ Compose persists credentials, state, and logs in the managed `texttube-data` vol
 - `/data/var/logs/` stores one timestamped file for each application run and retains it for less than 30 days.
 - `/data/var/texttube.lock` enforces singleton scheduled runs.
 
-Removing the OAuth token makes the service request approval again at its next validation; restarting `texttube` triggers that check immediately. Deleting the cutoff file resets the next subscription window to the previous 24 hours; the lock-safe maintenance command is documented in [AGENTS.md](AGENTS.md).
+Removing the OAuth token makes the next application run send a Google verification link and device code through Telegram, then wait for approval and continue. Deleting the cutoff file resets the next subscription window to the previous 24 hours; the lock-safe maintenance command is documented in [AGENTS.md](AGENTS.md).
 
 ## Validation
 

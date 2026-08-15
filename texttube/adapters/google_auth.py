@@ -1,4 +1,4 @@
-"""Google device authorization, token validation, storage, and health adapter."""
+"""Explicit Google device authorization, token validation, and storage adapter."""
 
 from __future__ import annotations
 
@@ -9,23 +9,28 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
-REFRESH_GRANT_TYPE = "refresh_token"
 REQUEST_TIMEOUT_SECONDS = 30
 SLOW_DOWN_INCREMENT_SECONDS = 5
-TOKEN_VALIDATION_INTERVAL_SECONDS = 60 * 60
-VALIDATION_RETRY_SECONDS = 60
-HEALTH_MAX_AGE_SECONDS = TOKEN_VALIDATION_INTERVAL_SECONDS + 5 * 60
-AUTHORIZATION_READY_PATH = Path("/run/texttube-auth.ready")
 
 
 class AuthorizationError(Exception):
     """Authorization failure safe to show to the operator."""
+
+
+class DeviceAuthorizationExpired(AuthorizationError):
+    """Google expired one device code before the operator approved it."""
+
+    def __init__(self, expires_in: int):
+        self.expires_in = expires_in
+        super().__init__(
+            f"Google OAuth device code expired after {expires_in} seconds"
+        )
 
 
 def post_form(url: str, data: dict[str, str]) -> tuple[int, dict[str, Any]]:
@@ -61,32 +66,6 @@ def response_error(payload: dict[str, Any], status_code: int) -> str:
             "'TVs and Limited Input devices'"
         )
     return f"{error}: {description}" if description else error
-
-
-def validate_refresh_token(
-    client_id: str,
-    client_secret: str,
-    refresh_token: str,
-) -> bool:
-    """Exchange a refresh token to prove that Google still accepts it."""
-    status_code, payload = post_form(
-        TOKEN_URL,
-        {
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "refresh_token": refresh_token,
-            "grant_type": REFRESH_GRANT_TYPE,
-        },
-    )
-    if status_code == 200:
-        if not str(payload.get("access_token", "")).strip():
-            raise AuthorizationError(
-                "Google OAuth refresh response omitted the access token"
-            )
-        return True
-    if str(payload.get("error", "")).strip() == "invalid_grant":
-        return False
-    raise AuthorizationError(response_error(payload, status_code))
 
 
 def request_device_authorization(client_id: str) -> dict[str, Any]:
@@ -166,7 +145,7 @@ def poll_for_refresh_token(
             interval += SLOW_DOWN_INCREMENT_SECONDS
             continue
         raise AuthorizationError(response_error(payload, status_code))
-    raise AuthorizationError("Google OAuth device code expired before approval")
+    raise DeviceAuthorizationExpired(int(authorization["expires_in"]))
 
 
 def store_refresh_token(path: Path, refresh_token: str) -> None:
@@ -202,14 +181,15 @@ def authorize(
     client_secret: str,
     token_path: Path,
     stop_requested: threading.Event,
+    present_instructions: Callable[[str, str, int], None],
 ) -> Path | None:
     """Complete device authorization and persist its refresh token."""
     authorization = request_device_authorization(client_id)
-    print("", file=sys.stderr)
-    print("Authorize TextTube with Google:", file=sys.stderr)
-    print(f"  Open: {authorization['verification_url']}", file=sys.stderr)
-    print(f"  Enter code: {authorization['user_code']}", file=sys.stderr)
-    print("", file=sys.stderr)
+    present_instructions(
+        str(authorization["verification_url"]),
+        str(authorization["user_code"]),
+        int(authorization["expires_in"]),
+    )
     print("Waiting for approval...", file=sys.stderr, flush=True)
     refresh_token = poll_for_refresh_token(
         client_id,
@@ -221,157 +201,3 @@ def authorize(
         return None
     store_refresh_token(token_path, refresh_token)
     return token_path
-
-
-def read_refresh_token(path: Path) -> str | None:
-    """Read the stored refresh token without printing it."""
-    try:
-        token = path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return None
-    return token or None
-
-
-def mark_healthy() -> None:
-    """Record that the service recently validated the stored refresh token."""
-    AUTHORIZATION_READY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    AUTHORIZATION_READY_PATH.touch()
-
-
-def mark_unhealthy() -> None:
-    """Remove authorization readiness without changing the stored token."""
-    AUTHORIZATION_READY_PATH.unlink(missing_ok=True)
-
-
-def healthcheck(token_path: Path) -> int:
-    """Report healthy only after recent validation of a nonempty stored token."""
-    try:
-        token = read_refresh_token(token_path)
-        validation_age = time.time() - AUTHORIZATION_READY_PATH.stat().st_mtime
-    except (OSError, ValueError):
-        return 1
-    if not token or validation_age < 0:
-        return 1
-    return 0 if validation_age <= HEALTH_MAX_AGE_SECONDS else 1
-
-
-class AuthorizationService:
-    """Maintains Google authorization and publishes container health readiness."""
-
-    def __init__(
-        self,
-        client_id: str,
-        client_secret: str,
-        token_path: Path,
-        *,
-        stop_requested: threading.Event | None = None,
-        startup_ready: threading.Event | None = None,
-    ):
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.token_path = token_path
-        self.stop_requested = stop_requested or threading.Event()
-        self.startup_ready = startup_ready
-
-    def request_stop(self) -> None:
-        """Interrupt authorization polling or periodic validation."""
-        self.stop_requested.set()
-
-    def run(self) -> int:
-        """Validate forever and authorize again whenever required."""
-        mark_unhealthy()
-        was_healthy = False
-        try:
-            while not self.stop_requested.is_set():
-                try:
-                    refresh_token = read_refresh_token(self.token_path)
-                    if refresh_token and validate_refresh_token(
-                        self.client_id,
-                        self.client_secret,
-                        refresh_token,
-                    ):
-                        mark_healthy()
-                        if self.startup_ready is not None:
-                            self.startup_ready.set()
-                        if not was_healthy:
-                            print(
-                                "Google OAuth refresh token is valid; "
-                                "authorization service is healthy.",
-                                file=sys.stderr,
-                                flush=True,
-                            )
-                        was_healthy = True
-                        if self.stop_requested.wait(TOKEN_VALIDATION_INTERVAL_SECONDS):
-                            break
-                        continue
-                    mark_unhealthy()
-                    print(
-                        "Google OAuth refresh token "
-                        + (
-                            "expired or was revoked; authorization is required."
-                            if refresh_token
-                            else "is missing; authorization is required."
-                        ),
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    was_healthy = False
-                    destination = authorize(
-                        self.client_id,
-                        self.client_secret,
-                        self.token_path,
-                        self.stop_requested,
-                    )
-                    if destination is None:
-                        break
-                    print(
-                        f"Google OAuth authorization stored securely at {destination}.",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                except (AuthorizationError, OSError) as exc:
-                    mark_unhealthy()
-                    was_healthy = False
-                    print(
-                        "Google OAuth authorization unavailable: "
-                        f"{exc}; retrying in {VALIDATION_RETRY_SECONDS} seconds.",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    if self.stop_requested.wait(VALIDATION_RETRY_SECONDS):
-                        break
-        finally:
-            mark_unhealthy()
-        return 0
-
-    def run_once(self) -> int:
-        """Validate or replace the stored refresh token, then exit."""
-        refresh_token = read_refresh_token(self.token_path)
-        if refresh_token and validate_refresh_token(
-            self.client_id,
-            self.client_secret,
-            refresh_token,
-        ):
-            print("Google OAuth refresh token is valid.", file=sys.stderr, flush=True)
-            return 0
-        if refresh_token:
-            print(
-                "Google OAuth refresh token expired or was revoked; "
-                "authorization is required.",
-                file=sys.stderr,
-                flush=True,
-            )
-        destination = authorize(
-            self.client_id,
-            self.client_secret,
-            self.token_path,
-            self.stop_requested,
-        )
-        if destination is None:
-            return 130
-        print(
-            f"Google OAuth authorization stored securely at {destination}.",
-            file=sys.stderr,
-            flush=True,
-        )
-        return 0

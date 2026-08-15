@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Sequence
+import threading
+from dataclasses import replace
+from pathlib import Path
+from typing import Any, Sequence
 
+from texttube.adapters.google_auth import DeviceAuthorizationExpired, authorize
 from texttube.adapters.openai import (
     OpenAIAudioTranscriber,
     OpenAISummarizer,
@@ -27,16 +31,19 @@ from texttube.adapters.youtube import YouTubeDiscovery
 from texttube.config import (
     DEFAULT_VIDEO_LIMIT,
     GENERIC_RUN_FAILURE_MESSAGE,
-    GOOGLE_OAUTH_AUTH_COMMAND,
-    GOOGLE_OAUTH_REAUTHORIZATION_MESSAGE,
     MAX_AUDIO_TRANSCRIPTION_DURATION_SECONDS,
     MAX_SHORT_DURATION_SECONDS,
     MAX_NATIVE_CAPTION_ATTEMPTS,
     OPENAI_SUMMARY_MODEL,
+    AppConfig,
     ConfigLoader,
     RuntimePaths,
 )
-from texttube.domain import FatalError, GoogleOAuthReauthorizationRequired
+from texttube.domain import (
+    FatalError,
+    GoogleOAuthAuthorizationTimeout,
+    GoogleOAuthReauthorizationRequired,
+)
 from texttube.pipeline import ApplicationPipeline, ProcessingPolicy, VideoPipeline
 
 
@@ -93,6 +100,19 @@ def main(arguments: Sequence[str] | None = None) -> int:
         log.write("startup: parse args")
         log.write("startup: load config")
         config = ConfigLoader.load_app_config(paths.google_refresh_token_path())
+
+        requests_module = import_requests()
+        session = requests_module.Session()
+        lifecycle.add_cleanup(session.close)
+        delivery = TelegramDelivery(session, config, log)
+        config, discovery = ensure_youtube_authorization(
+            session,
+            config,
+            paths.google_refresh_token_path(),
+            delivery,
+            log,
+        )
+
         prompt_path = paths.prompt_path()
         if not prompt_path.exists():
             raise FatalError(f"Missing summarizer prompt file: {prompt_path}")
@@ -105,16 +125,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
             ", ".join(options.transcript_languages),
         )
 
-        requests_module = import_requests()
-        session = requests_module.Session()
-        lifecycle.add_cleanup(session.close)
         openai_sdk = import_openai().OpenAI(
             api_key=config.openai_api_key,
             max_retries=0,
         )
         lifecycle.add_cleanup(openai_sdk.close)
 
-        delivery = TelegramDelivery(session, config, log)
         policy = ProcessingPolicy(
             max_short_duration_seconds=MAX_SHORT_DURATION_SECONDS,
             max_audio_duration_seconds=MAX_AUDIO_TRANSCRIPTION_DURATION_SECONDS,
@@ -149,7 +165,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
             log,
         )
         application = ApplicationPipeline(
-            YouTubeDiscovery(session, config, log),
+            discovery,
             video_pipeline,
             delivery,
             FileSubscriptionState(paths.state_root),
@@ -177,37 +193,138 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         log.write("interrupt: shutting down")
         return 130
+    except GoogleOAuthAuthorizationTimeout as exc:
+        log.write(f"authorization: {exc}")
+        return 1
     except FatalError as exc:
         log.write(f"fatal: {exc}")
-        _notify_run_failure(delivery, exc, log)
+        _notify_run_failure(delivery, log)
         return 1
     except Exception as exc:
         log.write(
             f"fatal: unexpected error: {log.exception(exc)}",
         )
-        _notify_run_failure(delivery, exc, log)
+        _notify_run_failure(delivery, log)
         return 1
     finally:
         lifecycle.cleanup()
         lifecycle.restore_signal_handlers()
 
 
-def _notify_run_failure(
-    delivery: TelegramDelivery | None,
-    error: Exception,
+def check_startup_authorization() -> int:
+    """Validate Google authorization once before the scheduler starts."""
+    paths = RuntimePaths.discover()
+    log = ConsoleLog()
+    lifecycle = ApplicationLifecycle(log)
+    lifecycle.add_cleanup(log.close)
+    lifecycle.install_signal_handlers()
+    delivery: TelegramDelivery | None = None
+    try:
+        log.write("container startup: load authorization config")
+        config = ConfigLoader.load_app_config(paths.google_refresh_token_path())
+        requests_module = import_requests()
+        session = requests_module.Session()
+        lifecycle.add_cleanup(session.close)
+        delivery = TelegramDelivery(session, config, log)
+        ensure_youtube_authorization(
+            session,
+            config,
+            paths.google_refresh_token_path(),
+            delivery,
+            log,
+        )
+        log.write("container startup: youtube authorization is valid")
+        return 0
+    except KeyboardInterrupt:
+        log.write("interrupt: shutting down")
+        return 130
+    except GoogleOAuthAuthorizationTimeout as exc:
+        log.write(f"authorization: {exc}")
+        return 1
+    except Exception as exc:
+        log.write(f"container startup authorization failed: {log.exception(exc)}")
+        _notify_run_failure(delivery, log)
+        return 1
+    finally:
+        lifecycle.cleanup()
+        lifecycle.restore_signal_handlers()
+
+
+def ensure_youtube_authorization(
+    session: Any,
+    config: AppConfig,
+    token_path: Path,
+    delivery: TelegramDelivery,
+    log: ConsoleLog,
+) -> tuple[AppConfig, YouTubeDiscovery]:
+    """Validate authorization or complete device authorization inside this run."""
+    if config.google_refresh_token:
+        discovery = YouTubeDiscovery(session, config, log)
+        log.write("startup: validate youtube authorization")
+        try:
+            discovery.ensure_authorized()
+        except GoogleOAuthReauthorizationRequired as exc:
+            log.write(f"startup: authorization unavailable: {exc}")
+        else:
+            return config, discovery
+
+    log.write("startup: request Google device authorization")
+    stop_requested = threading.Event()
+    try:
+        destination = authorize(
+            config.google_client_id,
+            config.google_client_secret,
+            token_path,
+            stop_requested,
+            present_instructions=lambda verification_url, user_code, expires_in: (
+                _send_authorization_instructions(
+                    delivery,
+                    verification_url,
+                    user_code,
+                    expires_in,
+                    log,
+                )
+            ),
+        )
+    except DeviceAuthorizationExpired as exc:
+        log.write(f"authorization: {exc}")
+        delivery.send_authorization_timeout_notice(exc.expires_in)
+        raise GoogleOAuthAuthorizationTimeout(str(exc)) from exc
+    if destination is None:
+        raise KeyboardInterrupt
+    refresh_token = ConfigLoader.read_google_refresh_token(destination)
+    if not refresh_token:
+        raise FatalError("Google authorization completed without a stored refresh token")
+    authorized_config = replace(config, google_refresh_token=refresh_token)
+    discovery = YouTubeDiscovery(session, authorized_config, log)
+    log.write("startup: validate restored youtube authorization")
+    discovery.ensure_authorized()
+    log.write("startup: authorization restored; continue run")
+    return authorized_config, discovery
+
+
+def _send_authorization_instructions(
+    delivery: TelegramDelivery,
+    verification_url: str,
+    user_code: str,
+    expires_in: int,
     log: ConsoleLog,
 ) -> None:
-    """Best-effort send the appropriate run-level failure message."""
+    """Send the Google verification link and device code through Telegram."""
+    log.write("authorization required: send telegram link and code")
+    delivery.send_authorization_notice(verification_url, user_code, expires_in)
+
+
+def _notify_run_failure(
+    delivery: TelegramDelivery | None,
+    log: ConsoleLog,
+) -> None:
+    """Best-effort send one generic run-level failure message."""
     if delivery is None:
         return
-    message = GENERIC_RUN_FAILURE_MESSAGE
-    if isinstance(error, GoogleOAuthReauthorizationRequired):
-        message = GOOGLE_OAUTH_REAUTHORIZATION_MESSAGE.format(
-            auth_command=GOOGLE_OAUTH_AUTH_COMMAND
-        )
     try:
         log.write("run failure: send telegram")
-        delivery.send_notice(message)
+        delivery.send_notice(GENERIC_RUN_FAILURE_MESSAGE)
     except Exception:
         log.write("telegram run failure notification failed")
 

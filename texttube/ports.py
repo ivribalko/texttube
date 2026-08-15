@@ -17,8 +17,6 @@ from texttube.domain import (
 class VideoDiscovery(Protocol):
     """Provides selected and subscription videos to the application core."""
 
-    def ensure_authorized(self) -> None: ...
-
     def fetch_video(self, video_id: str) -> Video: ...
 
     def iter_recent_videos(

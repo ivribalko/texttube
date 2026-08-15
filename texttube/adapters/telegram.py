@@ -58,6 +58,41 @@ class TelegramDelivery:
         """Send one plain run-level notice."""
         self._send_message(html.escape(message))
 
+    def send_authorization_notice(
+        self,
+        verification_url: str,
+        user_code: str,
+        expires_in: int,
+    ) -> None:
+        """Send a clickable authorization link and copyable device code."""
+        safe_url = html.escape(verification_url, quote=True)
+        safe_code = html.escape(user_code)
+        lifetime = self._format_duration(expires_in)
+        self._send_message(
+            "TextTube needs Google authorization.\n\n"
+            f"{safe_url}\n\n"
+            f"Tap code to copy: <code>{safe_code}</code>\n\n"
+            f"This code expires in {lifetime}."
+        )
+
+    def send_authorization_timeout_notice(self, expires_in: int) -> None:
+        """Announce that the application stopped waiting for device approval."""
+        self.send_notice(
+            "Google authorization code expired after "
+            f"{self._format_duration(expires_in)}. "
+            "Start another TextTube run to receive a new link and code."
+        )
+
+    @staticmethod
+    def _format_duration(seconds: int) -> str:
+        """Format an authorization TTL for concise Telegram copy."""
+        if seconds % 60 == 0:
+            minutes = seconds // 60
+            unit = "minute" if minutes == 1 else "minutes"
+            return f"{minutes} {unit}"
+        unit = "second" if seconds == 1 else "seconds"
+        return f"{seconds} {unit}"
+
     def _send_message(self, text: str) -> None:
         """Send one message through Telegram's Bot API."""
         try:

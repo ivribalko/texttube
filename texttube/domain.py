@@ -15,6 +15,10 @@ class GoogleOAuthReauthorizationRequired(FatalError):
     """Google OAuth failure that requires fresh operator authorization."""
 
 
+class GoogleOAuthAuthorizationTimeout(FatalError):
+    """Google device authorization exceeded the application wait limit."""
+
+
 class VideoFailure(Exception):
     """Per-video failure that allows later videos to continue."""
 

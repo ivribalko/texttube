@@ -33,15 +33,7 @@ TRANSCRIPT_PROXY_INTERNAL_URL = "http://vpn:8888"
 TRANSCRIPT_PROXY_CONTROL_INTERNAL_URL = "http://vpn:8000"
 GOOGLE_OAUTH_REFRESH_TOKEN_FILE = "google_oauth_refresh_token"
 TRANSCRIPT_LANGUAGE_SEPARATOR = ","
-GOOGLE_OAUTH_AUTH_COMMAND = (
-    "docker compose run --rm texttube auth --once"
-)
 GENERIC_RUN_FAILURE_MESSAGE = "TextTube run failed."
-GOOGLE_OAUTH_REAUTHORIZATION_MESSAGE = (
-    "TextTube could not access YouTube because Google authorization expired or was revoked. "
-    "Run {auth_command} to reconnect YouTube. The next run will process the preserved "
-    "subscription window."
-)
 
 
 @dataclass(frozen=True)
@@ -236,21 +228,13 @@ class ConfigLoader:
 
     @staticmethod
     def read_google_refresh_token(path: Path) -> str:
-        """Read the refresh token without exposing its value."""
-        if not path.exists():
-            raise FatalError(
-                "Google OAuth authorization is missing. Run "
-                f"`{GOOGLE_OAUTH_AUTH_COMMAND}`."
-            )
+        """Read the refresh token without exposing its value, or return empty."""
         try:
             refresh_token = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return ""
         except OSError as exc:
             raise FatalError(f"Cannot read Google OAuth authorization: {exc}") from exc
-        if not refresh_token:
-            raise FatalError(
-                "Google OAuth authorization is empty. Run "
-                f"`{GOOGLE_OAUTH_AUTH_COMMAND}`."
-            )
         return refresh_token
 
     @staticmethod

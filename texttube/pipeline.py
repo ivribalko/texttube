@@ -199,7 +199,6 @@ class ApplicationPipeline:
     def run_single_video(self, video_id: str) -> RunOutcome:
         """Process one selected video without advancing subscription state."""
         self.log.write(f"single video mode: {video_id}")
-        self.log.write("startup: resolve youtube token")
         video = self.discovery.fetch_video(video_id)
         outcome = self._attempt_video(video)
         delivered_count = int(outcome is not None and outcome.delivered)
@@ -208,8 +207,6 @@ class ApplicationPipeline:
 
     def run_subscriptions(self, limit: int) -> RunOutcome:
         """Process the current subscription window and persist its completion."""
-        self.log.write("startup: resolve youtube token")
-        self.discovery.ensure_authorized()
         window_start, window_end = self.state.subscription_window()
         self.log.write(
             f"subscription window utc: {window_start.isoformat()} -> {window_end.isoformat()}",

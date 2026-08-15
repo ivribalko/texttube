@@ -40,12 +40,6 @@ services:
       TEXTTUBE_LIMIT: "${TEXTTUBE_LIMIT:-}"
       TRANSCRIPT_LANGUAGES: "${TRANSCRIPT_LANGUAGES:-}"
       TZ: "${TZ:-UTC}"
-    healthcheck:
-      test: [CMD, python, -m, texttube.entrypoints.auth, --healthcheck]
-      interval: 5s
-      timeout: 5s
-      retries: 3
-      start_period: 30m
     volumes:
       - texttube-data:/data/var
     depends_on:
