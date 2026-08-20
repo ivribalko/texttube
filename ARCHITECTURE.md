@@ -173,7 +173,7 @@ The scheduler:
 ## Failure Behavior
 
 - Every individual HTTP request is attempted once. The OpenAI client uses `max_retries=0`; device authorization performs protocol-required polling. An explicit direct YouTube IP block may restart caption resolution on the current VPN exit, and a blocked VPN exit may restart it on at most three fresh exits. Other durable native-caption retries occur once per later application run rather than inside a request.
-- VPN rotation stops and starts the gateway through its authenticated private control API, waits for the tunnel to report `running`, and requires a nonempty public IP different from every rejected exit before retrying. Rotation timeout or pool exhaustion becomes the current run's single native-caption failure.
+- VPN rotation stops and starts the gateway through its authenticated private control API, even when the gateway has temporarily lost its cached public IP, waits for the tunnel to report `running`, and requires a nonempty public IP different from every known rejected exit before retrying. Rotation timeout or pool exhaustion becomes the current run's single native-caption failure.
 - YouTube `playlistNotFound` and `playlistOperationUnsupported` errors for an individual subscription channel produce a Telegram notice and allow remaining channels to continue.
 - Native-caption retrieval failures persist the video ID through attempt two. Other expected per-video failures use the description fallback or allow later videos to continue without persistence.
 - Fatal failures after Telegram construction trigger a run-level notice.

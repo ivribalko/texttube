@@ -29,8 +29,9 @@ class TranscriptProxyRotator:
 
     def rotate(self) -> None:
         """Replace the active VPN public IP or raise a per-video failure."""
-        previous_ip = self._public_ip()
-        self.rejected_ips.add(previous_ip)
+        previous_ip = self._public_ip(required=False)
+        if previous_ip:
+            self.rejected_ips.add(previous_ip)
         self.log.write(
             "transcript proxy: reconnect for a different public IP",
         )
