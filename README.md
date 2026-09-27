@@ -34,7 +34,7 @@ Start the scheduler from the directory containing the deployed `compose.yaml`:
 docker compose up --detach --pull always
 ```
 
-Container startup validates authorization once before the scheduler begins. Every scheduled or manual application run validates it again at the beginning of that run. If the token is missing, expired, or revoked, the current process starts Google device authorization and sends one Telegram message containing the direct verification URL, a tap-to-copy code, and Google’s TTL for that code. Approve the code from the link; the waiting process stores the replacement token and continues. If the code expires, the process sends a Telegram expiration message and exits without requesting a replacement. Authorization is not polled between these checks.
+Container startup validates authorization once before the scheduler begins. Every scheduled or manual application run validates it again at the beginning of that run. If the token is missing, expired, or revoked, the current process starts Google device authorization and sends one Telegram message containing a tap-to-copy code, followed by the direct verification URL and Google’s TTL for that code. Approve the code from the link; the waiting process stores the replacement token and continues. If the code expires, the process sends a Telegram expiration message and exits without requesting a replacement. Authorization is not polled between these checks.
 
 Follow scheduler and application output when needed:
 

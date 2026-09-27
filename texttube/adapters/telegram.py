@@ -70,8 +70,8 @@ class TelegramDelivery:
         lifetime = self._format_duration(expires_in)
         self._send_message(
             "TextTube needs Google authorization.\n\n"
-            f"{safe_url}\n\n"
             f"Tap code to copy: <code>{safe_code}</code>\n\n"
+            f"{safe_url}\n\n"
             f"This code expires in {lifetime}."
         )
 
