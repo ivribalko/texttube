@@ -124,6 +124,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
             "{{TRANSCRIPT_LANGUAGES}}",
             ", ".join(options.transcript_languages),
         )
+        description_prompt = description_prompt.replace(
+            "{{TRANSCRIPT_LANGUAGES}}",
+            ", ".join(options.transcript_languages),
+        )
 
         openai_sdk = import_openai().OpenAI(
             api_key=config.openai_api_key,

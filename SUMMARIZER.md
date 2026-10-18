@@ -54,7 +54,15 @@ Use the title only to identify relevance; it is not an independent factual sourc
 
 ### Language
 
-Use the description's dominant language.
+Preferred summary language codes: `{{TRANSCRIPT_LANGUAGES}}`.
+
+- Treat the comma-separated value as empty when no codes are listed.
+- Detect the description's dominant language.
+- Treat a primary language code and its regional variants as matching.
+- If the description's language matches a preference, write in that language.
+- Otherwise, if preferences exist, choose the most appropriate one and translate the summary into it.
+- Without preferences, use the description's dominant language.
+- Do not mix languages except for essential proper names or terms that should remain untranslated.
 
 ## Output Rules
 
