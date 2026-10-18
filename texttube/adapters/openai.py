@@ -131,6 +131,7 @@ class OpenAISummarizer:
         prompt = self.build_summary_prompt(
             transcript.text,
             language_code=transcript.language_code,
+            target_language_code=video.preferred_language,
         )
         if not prompt:
             raise VideoFailure("summary unavailable: transcript was empty")
@@ -215,18 +216,20 @@ class OpenAISummarizer:
         transcript: str,
         *,
         language_code: str = "",
+        target_language_code: str = "",
     ) -> str:
-        """Attach the YouTube source language fact when available."""
+        """Attach separate caption-source and metadata-target language hints."""
         cleaned_transcript = transcript.strip()
         if not cleaned_transcript:
             return ""
         normalized_language_code = language_code.strip().lower()
-        if not normalized_language_code:
-            return cleaned_transcript
-        return (
-            f"YouTube source language code: {normalized_language_code}.\n\n"
-            f"{cleaned_transcript}"
-        )
+        metadata = []
+        if normalized_language_code:
+            metadata.append(f"YouTube source language code: {normalized_language_code}.")
+        normalized_target = target_language_code.strip().lower()
+        if normalized_target:
+            metadata.append(f"YouTube summary target language code: {normalized_target}.")
+        return "\n\n".join([*metadata, cleaned_transcript])
 
 
 class OpenAIAudioTranscriber:

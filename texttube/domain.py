@@ -76,6 +76,12 @@ class Video:
     default_audio_language: str = ""
     description: str = ""
     tags: tuple[str, ...] = ()
+    default_language: str = ""
+
+    @property
+    def preferred_language(self) -> str:
+        """Resolve video language from audio metadata, then title metadata."""
+        return self.default_audio_language or self.default_language
 
 
 @dataclass(frozen=True)

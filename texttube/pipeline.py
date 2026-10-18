@@ -129,6 +129,7 @@ class VideoPipeline:
             self.log.write(
                 f"process {video.video_id}: summarize transcript "
                 f"language={transcript.language_code or 'unknown'} "
+                f"target_language={video.preferred_language or transcript.language_code or 'unknown'} "
                 f"chars={len(transcript.text)} lines={len(transcript.text.splitlines())}",
             )
             return Summary(

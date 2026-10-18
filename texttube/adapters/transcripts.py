@@ -364,7 +364,7 @@ class NativeTranscriptFetcher:
             )
             if original_audio_rank is not None:
                 self.log.write(
-                    "transcript native: original audio language matched preference "
+                    "transcript native: video language matched preference "
                     f"{video_id}: {self.language_preferences[original_audio_rank[0]]}"
                 )
         candidates = self.order_candidates(
@@ -439,7 +439,7 @@ class TranscriptResolver:
             )
             result = self.native.fetch(
                 video.video_id,
-                original_audio_language=video.default_audio_language,
+                original_audio_language=video.preferred_language,
             )
         except VideoFailure as transcript_exc:
             self.log.write(f"transcript fallback {video.video_id}: {transcript_exc}")

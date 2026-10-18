@@ -126,6 +126,7 @@ class YouTubeDiscovery:
             ).strip().lower(),
             description=str(snippet.get("description", "")).strip(),
             tags=tags,
+            default_language=str(snippet.get("defaultLanguage", "")).strip().lower(),
         )
 
     def iter_recent_videos(
@@ -251,6 +252,9 @@ class YouTubeDiscovery:
                         snippet.get("defaultAudioLanguage", "")
                     ).strip().lower(),
                     tags=tags,
+                    default_language=str(
+                        snippet.get("defaultLanguage", "")
+                    ).strip().lower(),
                 )
         self.log.write(f"videos metadata: enriched {len(by_id)}")
         return [by_id[video.video_id] for video in videos if video.video_id in by_id]
