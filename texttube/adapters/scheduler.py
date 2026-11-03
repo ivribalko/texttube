@@ -9,6 +9,7 @@ import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
@@ -32,11 +33,13 @@ class CronScheduler:
         *,
         schedule_timezone: ZoneInfo,
         stop_requested: threading.Event | None = None,
+        poll_restart: Callable[[], bool] | None = None,
     ):
         self.expression = expression
         self.schedule_timezone = schedule_timezone
         self.stop_requested = stop_requested or threading.Event()
         self.child: subprocess.Popen[bytes] | None = None
+        self.poll_restart = poll_restart
 
     @staticmethod
     def validate_expression(expression: str) -> str:
@@ -95,7 +98,14 @@ class CronScheduler:
                     - datetime.now(timezone.utc)
                 ).total_seconds(),
             )
-            if self.stop_requested.wait(wait_seconds):
+            while wait_seconds > 0 and not self.stop_requested.is_set():
+                if self.poll_restart is not None and self.poll_restart():
+                    scheduler_log("telegram command: start application run")
+                    self.run_application()
+                if self.stop_requested.wait(min(wait_seconds, 3)):
+                    break
+                wait_seconds = (next_run.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+            if self.stop_requested.is_set():
                 break
             self.run_application()
         return 0

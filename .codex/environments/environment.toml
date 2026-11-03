@@ -1,0 +1,10 @@
+version = 1
+name = "TextTube"
+
+[setup]
+script = ""
+
+[[actions]]
+name = "Run"
+icon = "run"
+command = "docker compose --env-file .env --file compose.yaml --file compose.local.yaml up --build --force-recreate"

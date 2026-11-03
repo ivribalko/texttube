@@ -10,7 +10,7 @@ from texttube.entrypoints.scheduler import main as scheduler_main
 
 
 def main(arguments: Sequence[str] | None = None) -> int:
-    """Dispatch the scheduler and explicit application or authorization runs."""
+    """Dispatch the scheduler and explicit application runs."""
     parsed = list(arguments) if arguments is not None else sys.argv[1:]
     command = parsed[0] if parsed else "serve"
     command_arguments = parsed[1:]

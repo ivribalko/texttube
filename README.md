@@ -48,6 +48,20 @@ No callback port, public domain, workstation helper, repository checkout, or `co
 
 Manual commands use `docker compose run` and do not disturb the long-running service.
 
+## Telegram Restart Command
+
+Send `/texttube_restart` as a complete message in the configured bot chat while the service is running to start a subscription run. If Google authorization is required, approve the link and code returned by the bot; the waiting run continues after approval. Use a private bot chat for this command; in a configured group, any member can request a run. This is the only accepted Telegram command. Scheduler startup registers it in the bot command menu.
+
+Run the local service to try the command:
+
+```sh
+docker compose --env-file .env \
+  --file compose.yaml --file compose.local.yaml \
+  run --build --rm texttube serve
+```
+
+Only one service may poll updates for the bot. Commands wait until any active application or authorization run finishes.
+
 ## Automatic VPN IP Rotation
 
 The optional `vpn` profile in [compose.yaml](compose.yaml) runs a private WireGuard gateway and HTTP proxy. Native-caption requests use the normal connection until YouTube explicitly blocks its IP. Only the blocked caption request and subsequent caption requests in that application run use the proxy. Google authorization, YouTube Data API discovery, OpenAI, and Telegram always use the normal container connection.
@@ -86,6 +100,8 @@ docker compose --env-file .env \
 The proxy and control ports remain private to the Compose network and must not be published. VPN exit addresses may themselves be blocked by YouTube, so rotation cannot guarantee that the configured pool contains an accepted address.
 
 ## Local Source Runs
+
+The Codex **Run** action rebuilds the local image and recreates the full enabled Compose stack with attached logs. It starts Google authorization, the scheduler, and the Telegram command listener. Use `/texttube_restart` in Telegram to request an immediate subscription run. Stop the attached command with Ctrl+C; managed data remains in the named volume.
 
 Keep local Compose configuration in a repository-root `.env` file. The file is ignored by Git, and `compose.local.yaml` requires and loads it for containers built from the current source. Define the required credentials listed under [Requirements](#requirements), plus `CRON` when running the default `serve` mode. Set `TZ` to an IANA timezone name when scheduling should use a timezone other than UTC.
 
@@ -148,7 +164,7 @@ docker compose exec texttube ls -l /data/var/logs
 
 Application logs include all progress and error messages, including the summary source, language hint, input and prompt fingerprints, model output, duration, and failure details. Transcript and description input texts are never printed.
 
-Manual `app` and `auth` runs still write directly to their attached terminal. The documented `app --rm` workflow removes its one-off container while preserving the application run file in the managed volume. Authorization and scheduler-only messages remain standard-stream output and are available through Docker’s configured logging driver.
+Manual `app` runs still write directly to their attached terminal. The documented `app --rm` workflow removes its one-off container while preserving the application run file in the managed volume. Authorization and scheduler-only messages remain standard-stream output and are available through Docker’s configured logging driver.
 
 ## Runtime Configuration
 

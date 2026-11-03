@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import os
+import fcntl
 import signal
 import sys
 from types import FrameType
 from typing import Sequence
 
 from texttube.adapters.scheduler import CronScheduler, scheduler_log
+from texttube.adapters.telegram import TelegramCommands
+from texttube.adapters.state import ConsoleLog
+from texttube.config import ConfigLoader, RuntimePaths
 
 INVALID_CONFIGURATION_EXIT_CODE = 2
 
@@ -37,7 +41,28 @@ def main(arguments: Sequence[str] | None = None) -> int:
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
-    return scheduler.run()
+    import requests
+
+    paths = RuntimePaths.discover()
+    state_dir = paths.google_refresh_token_path().parent
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with (state_dir / "telegram_commands.lock").open("a") as listener_lock:
+        try:
+            fcntl.flock(listener_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            scheduler_log("another Telegram command listener is already running")
+            return 1
+        with requests.Session() as session:
+            commands = TelegramCommands(
+                session,
+                ConfigLoader.load_app_config(paths.google_refresh_token_path()),
+                state_dir / "telegram_update_offset.txt",
+                ConsoleLog(),
+            )
+            commands.register_menu()
+            scheduler.poll_restart = commands.poll
+            scheduler_log("Telegram command listener ready")
+            return scheduler.run()
 
 
 if __name__ == "__main__":

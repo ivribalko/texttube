@@ -70,7 +70,7 @@ The container entrypoint accepts these modes:
 
 - `serve` runs the cron scheduler. This is the Compose default.
 - `app` performs one manual subscription or selected-video run.
-- `scheduler` runs the scheduler alone for diagnostics.
+- `scheduler` runs scheduling and Telegram command polling without the startup authorization gate.
 
 The image starts `texttube.entrypoints.service` as a Python module. The scheduler launches `texttube.entrypoints.app` the same way. These package modules are the only process launch surfaces.
 
@@ -107,6 +107,10 @@ Automatic VPN rotation additionally requires the gateway image, provider identif
 `CRON` is required by `serve` and `scheduler` modes but ignored by manual `app` commands. `TZ` is an IANA timezone for cron evaluation and container-local log timestamps; Compose defaults it to `UTC`. Subscription boundaries and run-log filenames remain in UTC. `TRANSCRIPT_LANGUAGES` controls native-caption preference order and acceptable transcript- and description-summary languages. `TEXTTUBE_LIMIT` provides the application limit default. `SUMMARIZER_MD` selects the summary prompt document outside the packaged Compose workflow.
 
 Google credentials must use application type `TVs and Limited Input devices`. Container `serve` startup and every application run exchange the stored refresh token for an access token before continuing. A missing, expired, or revoked token starts Google’s YouTube read-only device flow and sends one Telegram notice containing a copyable inline-code device code, followed by the direct verification URL and the TTL returned by Google. The process polls Google at the required interval, atomically stores the approved replacement token with owner-only permissions, validates it, and continues its original work. If the code reaches its TTL without approval, the process sends a Telegram expiration notice and exits without requesting a replacement. The refresh token is never printed or exposed through a Compose environment variable.
+
+At startup, the scheduler replaces the default and configured-chat command lists with `texttube_restart` and enables the commands menu button globally and for the configured private chat. Language-specific command overrides are not modified. Registration failures are logged without credentials and do not prevent polling. The scheduler polls Telegram messages every three seconds while idle. Only exact `/texttube_restart` messages from the configured chat, sent since listener startup, trigger a subscription run. Bot messages, other chats, edited messages, and older messages are ignored. A batch of requests is coalesced into one application run. The consumed update cursor is atomically persisted in `/data/var/state/telegram_update_offset.txt` before dispatch to prevent replay after restart; a crash between persistence and dispatch requires resending the command. `/data/var/state/telegram_commands.lock` permits one listener per managed volume. Only one deployment may consume updates for a bot; an existing webhook or another poller causes polling errors. Polling errors are logged without request URLs or credentials and do not stop scheduling.
+
+Command-triggered runs use the same isolated application subprocess and scheduled-run lock as cron runs. The application validates its stored Google authorization before processing videos. Missing or rejected authorization starts device authorization and waits for approval, then stores and validates the replacement token before continuing the subscription run. Valid authorization proceeds directly. Commands received during a run wait for it to finish; a lock held by another process skips the request. Authorization failure or expiration aborts that application run without advancing subscription state and leaves scheduling active. The command does not restart the container or force replacement of valid authorization.
 
 ## Application Components
 
