@@ -15,6 +15,7 @@ from texttube.domain import (
     VideoFailure,
     VideoOutcome,
     VideoStatus,
+    VideoUnavailable,
 )
 from texttube.ports import (
     Delivery,
@@ -279,7 +280,15 @@ class ApplicationPipeline:
                 return sent_count, attempted_video_ids, True
             video_id = failure.video_id
             attempted_video_ids.add(video_id)
-            video = self.discovery.fetch_video(video_id)
+            try:
+                video = self.discovery.fetch_video(video_id)
+            except VideoUnavailable as exc:
+                self.state.complete_caption_retry(video_id)
+                self.log.write(
+                    f"pending native captions: removed unavailable video {video_id}: "
+                    f"{self.log.exception(exc)}",
+                )
+                continue
             outcome = self._attempt_video(video)
             if outcome is not None and outcome.delivered:
                 sent_count += 1

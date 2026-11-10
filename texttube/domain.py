@@ -11,6 +11,10 @@ class FatalError(Exception):
     """Fatal setup or API failure that stops the whole run."""
 
 
+class VideoUnavailable(FatalError):
+    """Missing video metadata, recoverable when processing pending retries."""
+
+
 class GoogleOAuthReauthorizationRequired(FatalError):
     """Google OAuth failure that requires fresh operator authorization."""
 

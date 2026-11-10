@@ -13,6 +13,7 @@ from texttube.domain import (
     FatalError,
     GoogleOAuthReauthorizationRequired,
     Video,
+    VideoUnavailable,
 )
 from texttube.ports import Log
 
@@ -94,8 +95,10 @@ class YouTubeDiscovery:
             {"part": "snippet,contentDetails", "id": video_id, "maxResults": 1},
         )
         items = page.get("items", [])
-        if not isinstance(items, list) or not items:
-            raise FatalError(f"YouTube video not found or unavailable: {video_id}")
+        if not isinstance(items, list):
+            raise FatalError(f"YouTube returned unexpected video metadata for: {video_id}")
+        if not items:
+            raise VideoUnavailable(f"YouTube video not found or unavailable: {video_id}")
         item = items[0]
         if not isinstance(item, dict):
             raise FatalError(f"YouTube returned unexpected video metadata for: {video_id}")
